@@ -1,0 +1,17 @@
+apiVersion: networking.istio.io/v1beta1
+kind: ServiceEntry
+metadata:
+  name: hello-breaker-sv
+  namespace: c1
+spec:
+  hosts:
+  - hello-breaker.c1.svc.ice.local
+  location: MESH_INTERNAL
+  ports:
+  - name: http
+    number: 8888
+    protocol: TCP
+  resolution: DNS
+  workloadSelector:
+    labels:
+      app: hello
