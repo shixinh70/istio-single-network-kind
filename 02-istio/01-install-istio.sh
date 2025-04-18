@@ -14,6 +14,7 @@ if [ -d "../istio_bin" ]; then
 else
   echo "🔽 Extracting istio_bin"
   tar -xzvf "../istio_bin.tar.gz"
+  mv ./istio_bin ../
 fi
 
 for i in $(seq "${NUM_CLUSTERS}"); do

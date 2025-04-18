@@ -39,5 +39,7 @@ function delete_clusters() {
 
 echo "Deleting ${NUM_CLUSTERS} clusters"
 delete_clusters "${NUM_CLUSTERS}"
+echo "Deleting istio_bin"
+rm -r ../istio_bin
 
 echo "Complete"
