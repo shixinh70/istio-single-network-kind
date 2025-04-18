@@ -1,15 +1,17 @@
 #!/bin/bash
 
-# 檢查參數
-if [ "$#" -ne 2 ]; then
-  echo "Usage: $0 <cluster1-name> <cluster2-name>"
-  exit 1
-fi
+# 設定預設 cluster 名稱
+DEFAULT_CLUSTER1="cluster1"
+DEFAULT_CLUSTER2="cluster2"
 
-CLUSTER1="$1"        # 例如: a
-CLUSTER2="$2"        # 例如: b
+# 如果沒有輸入參數，使用預設值
+CLUSTER1="${1:-$DEFAULT_CLUSTER1}"
+CLUSTER2="${2:-$DEFAULT_CLUSTER2}"
+
 CONTEXT1="$CLUSTER1"
 CONTEXT2="$CLUSTER2"
+
+echo "🔗 Connecting clusters: $CLUSTER1 <--> $CLUSTER2"
 
 # 取得某個 context 的 IP routes
 get_routes() {

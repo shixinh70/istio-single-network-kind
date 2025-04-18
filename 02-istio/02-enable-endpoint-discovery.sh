@@ -16,14 +16,14 @@ for i in $(seq "${NUM_CLUSTERS}"); do
       if [ "$OS" == "Darwin" ]; then
         # Set container IP address as kube API endpoint in order for clusters to reach kube API servers in other clusters.
         docker_ip=$(docker inspect -f '{{range.NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "cluster${i}-control-plane")
-        "istioctl-1.24.2"  create-remote-secret \
+        "../istio_bin/istioctl-1.24.2"  create-remote-secret \
           --context="cluster${i}" \
           --server="https://${docker_ip}:6443" \
           --name="cluster${i}" | \
           kubectl apply --validate=false --context="cluster${j}" -f -
       else
         docker_ip=$(docker inspect -f '{{range.NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "cluster${i}-control-plane")
-        "istioctl-1.24.2"  create-remote-secret \
+        "../istio_bin/istioctl-1.24.2"  create-remote-secret \
           --server="https://${docker_ip}:6443" \
           --context="cluster${i}" \
           --name="cluster${i}" | \
