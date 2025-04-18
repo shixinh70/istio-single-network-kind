@@ -12,3 +12,6 @@ Kubectl: v1.32.0 (版本應該還好)
 
 # Usage
 Run ./run-01-to-03
+
+# Ref
+Modify from https://github.com/sedflix/multi-cluster-istio-kind
