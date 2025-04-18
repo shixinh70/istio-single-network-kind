@@ -8,7 +8,7 @@ Kubernetes: v1.24.17
 # Requirement
 Kind: 0.26.0
 
-Kubectl: v1.32.0
+Kubectl: v1.32.0 (版本應該還好)
 
 # Usage
 Run ./run-01-to-03
