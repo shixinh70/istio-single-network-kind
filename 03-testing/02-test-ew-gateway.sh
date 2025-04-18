@@ -26,7 +26,7 @@ done
 
 # Run curl 10 times
 echo "🔁 Verifying alternating responses from helloworld v1 and v2:"
-for i in {1..10}; do
+for i in {1..20}; do
   echo -n "[$i] "
   kubectl --context="$SOURCE_CONTEXT" -n "$NAMESPACE" exec "$SOURCE_POD" -- curl -sS helloworld:5000/hello
 done
