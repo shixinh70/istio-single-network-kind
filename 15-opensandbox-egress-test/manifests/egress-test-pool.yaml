@@ -1,0 +1,27 @@
+apiVersion: sandbox.opensandbox.io/v1alpha1
+kind: Pool
+metadata:
+  name: egress-test-pool
+  namespace: opensandbox-system
+spec:
+  template:
+    spec:
+      containers:
+      - name: sandbox-container
+        image: curlimages/curl:8.16.0
+        command: ["sleep", "infinity"]
+      - name: egress
+        image: opensandbox/egress:v1.1.5
+        securityContext:
+          capabilities:
+            add: ["NET_ADMIN"]
+        env:
+        - name: OPENSANDBOX_EGRESS_MODE
+          value: "dns+nft"
+        - name: OPENSANDBOX_EGRESS_RULES
+          value: '{"defaultAction":"deny","egress":[{"action":"allow","target":"api.github.com"}]}'
+  capacitySpec:
+    bufferMax: 4
+    bufferMin: 1
+    poolMax: 4
+    poolMin: 1
