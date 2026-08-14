@@ -1,0 +1,6 @@
+scope,propagated,propagate_time_s,istiod_cpu_ms,proxy_cpu_ms
+small-scope(N=10),1,.378858047,151.97,49.31
+small-scope(N=10)-run2,1,.398014831,95.63,42.04
+large-scope(N=2000),1,5.736809145,259.15,1163.05
+large-scope(N=2000)-run2,1,5.645262053,245.98,1157.24
+mid-scope(N=500),1,2.279283170,296.71,369.23

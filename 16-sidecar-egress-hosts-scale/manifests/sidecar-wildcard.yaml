@@ -1,0 +1,14 @@
+apiVersion: networking.istio.io/v1beta1
+kind: Sidecar
+metadata:
+  name: local-ns-egress-scale-test
+  namespace: local-ns
+spec:
+  workloadSelector:
+    labels:
+      app: client
+  egress:
+  - hosts:
+    - "istio-system/*"
+    - "local-ns/*"
+    - "remote-ns/*"

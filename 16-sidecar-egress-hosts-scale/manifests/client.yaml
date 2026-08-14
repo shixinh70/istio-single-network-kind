@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: client
+  namespace: local-ns
+  labels:
+    app: client
+spec:
+  containers:
+  - name: client
+    image: curlimages/curl:8.16.0
+    command: ["sleep", "infinity"]

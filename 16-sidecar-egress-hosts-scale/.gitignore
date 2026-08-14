@@ -1,0 +1,6 @@
+# Bulk generated test manifests — reproducible via gen_services.py /
+# gen_sidecar.py / gen_sidecar_ghost.py (see README.md for exact invocations),
+# not worth keeping in git (some are 1MB+).
+manifests/services-*.yaml
+manifests/sidecar-[0-9]*.yaml
+manifests/sidecar-ghost-*.yaml

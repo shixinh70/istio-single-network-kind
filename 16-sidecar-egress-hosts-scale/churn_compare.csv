@@ -1,0 +1,5 @@
+config,propagated,propagate_time_s,istiod_cpu_ms,proxy_cpu_ms
+explicit-500(fresh),1,2.100226966,111.32,349.33
+wildcard(fresh),1,2.099156190,87.71,319.15
+explicit-2000(fresh),1,5.756309999,412.86,1179.42
+wildcard-2000(fresh),1,5.706871361,214.88,1167.47
