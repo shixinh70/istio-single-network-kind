@@ -1,0 +1,252 @@
+import sys
+
+# Usage: gen_spire_cluster.py <cluster_name> <trust_domain> <out_file>
+# Emits a self-contained SPIRE Server (StatefulSet, 1 replica, sqlite
+# datastore) + SPIRE Agent (DaemonSet) manifest for one cluster, k8s_psat
+# node attestation, insecure_bootstrap (lab-only shortcut — agent trusts
+# the server on first contact without a pre-shared bootstrap bundle; fine
+# for a Kind lab, not for production).
+
+cluster_name = sys.argv[1]
+trust_domain = sys.argv[2]
+out_file = sys.argv[3]
+
+doc = f"""apiVersion: v1
+kind: Namespace
+metadata:
+  name: spire
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: spire-server
+  namespace: spire
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: spire-agent
+  namespace: spire
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: spire-server-trust-role
+rules:
+- apiGroups: ["authentication.k8s.io"]
+  resources: ["tokenreviews"]
+  verbs: ["create"]
+- apiGroups: [""]
+  resources: ["pods", "nodes"]
+  verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: spire-server-trust-role-binding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: spire-server-trust-role
+subjects:
+- kind: ServiceAccount
+  name: spire-server
+  namespace: spire
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: spire-agent-node-role
+rules:
+- apiGroups: [""]
+  resources: ["pods", "nodes", "nodes/proxy"]
+  verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: spire-agent-node-role-binding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: spire-agent-node-role
+subjects:
+- kind: ServiceAccount
+  name: spire-agent
+  namespace: spire
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: spire-server-conf
+  namespace: spire
+data:
+  server.conf: |
+    server {{
+      bind_address = "0.0.0.0"
+      bind_port = "8081"
+      trust_domain = "{trust_domain}"
+      data_dir = "/run/spire/data"
+      log_level = "INFO"
+      ca_subject = {{
+        country = ["US"],
+        organization = ["spire-lab"],
+        common_name = "{cluster_name}",
+      }}
+    }}
+    plugins {{
+      DataStore "sql" {{
+        plugin_data {{
+          database_type = "sqlite3"
+          connection_string = "/run/spire/data/datastore.sqlite3"
+        }}
+      }}
+      NodeAttestor "k8s_psat" {{
+        plugin_data {{
+          clusters = {{
+            "{cluster_name}" = {{
+              service_account_allow_list = ["spire:spire-agent"]
+            }}
+          }}
+        }}
+      }}
+      KeyManager "disk" {{
+        plugin_data {{
+          keys_path = "/run/spire/data/keys.json"
+        }}
+      }}
+    }}
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: spire-server
+  namespace: spire
+spec:
+  serviceName: spire-server
+  replicas: 1
+  selector:
+    matchLabels:
+      app: spire-server
+  template:
+    metadata:
+      labels:
+        app: spire-server
+    spec:
+      serviceAccountName: spire-server
+      containers:
+      - name: spire-server
+        image: ghcr.io/spiffe/spire-server:1.11.2
+        args: ["-config", "/run/spire/config/server.conf"]
+        ports:
+        - containerPort: 8081
+        volumeMounts:
+        - name: spire-config
+          mountPath: /run/spire/config
+          readOnly: true
+        - name: spire-data
+          mountPath: /run/spire/data
+      volumes:
+      - name: spire-config
+        configMap:
+          name: spire-server-conf
+      - name: spire-data
+        emptyDir: {{}}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: spire-server
+  namespace: spire
+spec:
+  selector:
+    app: spire-server
+  ports:
+  - port: 8081
+    targetPort: 8081
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: spire-agent-conf
+  namespace: spire
+data:
+  agent.conf: |
+    agent {{
+      data_dir = "/run/spire"
+      log_level = "INFO"
+      server_address = "spire-server.spire.svc.cluster.local"
+      server_port = "8081"
+      trust_domain = "{trust_domain}"
+      socket_path = "/run/spire/sockets/agent.sock"
+      insecure_bootstrap = true
+    }}
+    plugins {{
+      NodeAttestor "k8s_psat" {{
+        plugin_data {{
+          cluster = "{cluster_name}"
+        }}
+      }}
+      KeyManager "memory" {{
+        plugin_data {{}}
+      }}
+      WorkloadAttestor "k8s" {{
+        plugin_data {{
+          skip_kubelet_verification = true
+        }}
+      }}
+    }}
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: spire-agent
+  namespace: spire
+spec:
+  selector:
+    matchLabels:
+      app: spire-agent
+  template:
+    metadata:
+      labels:
+        app: spire-agent
+    spec:
+      hostPID: true
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      serviceAccountName: spire-agent
+      containers:
+      - name: spire-agent
+        image: ghcr.io/spiffe/spire-agent:1.11.2
+        args: ["-config", "/run/spire/config/agent.conf"]
+        volumeMounts:
+        - name: spire-config
+          mountPath: /run/spire/config
+          readOnly: true
+        - name: spire-agent-socket
+          mountPath: /run/spire/sockets
+        - name: spire-token
+          mountPath: /var/run/secrets/tokens
+        securityContext:
+          privileged: true
+      volumes:
+      - name: spire-config
+        configMap:
+          name: spire-agent-conf
+      - name: spire-agent-socket
+        hostPath:
+          path: /run/spire/sockets
+          type: DirectoryOrCreate
+      - name: spire-token
+        projected:
+          sources:
+          - serviceAccountToken:
+              path: spire-agent
+              expirationSeconds: 7200
+              audience: spire-server
+"""
+
+with open(out_file, "w") as f:
+    f.write(doc)
+
+print(f"generated SPIRE manifest for cluster={cluster_name} trust_domain={trust_domain} -> {out_file}")
