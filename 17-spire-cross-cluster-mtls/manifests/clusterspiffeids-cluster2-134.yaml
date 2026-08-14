@@ -1,0 +1,25 @@
+apiVersion: spire.spiffe.io/v1alpha1
+kind: ClusterSPIFFEID
+metadata:
+  name: mcp-ingress-workload
+spec:
+  spiffeIDTemplate: "spiffe://{{ .TrustDomain }}/mcp-ingress"
+  workloadSelectorTemplates:
+    - "k8s:ns:mcp-gw"
+    - "k8s:sa:mcp-ingressgateway"
+  federatesWith:
+    - "cluster1-134.local"
+    - "cluster2.local"
+---
+apiVersion: spire.spiffe.io/v1alpha1
+kind: ClusterSPIFFEID
+metadata:
+  name: mcp-echo-spire-workload
+spec:
+  spiffeIDTemplate: "spiffe://{{ .TrustDomain }}/mcp-echo-spire"
+  workloadSelectorTemplates:
+    - "k8s:ns:mcp-gw"
+    - "k8s:sa:mcp-echo-spire"
+  federatesWith:
+    - "cluster1-134.local"
+    - "cluster2.local"

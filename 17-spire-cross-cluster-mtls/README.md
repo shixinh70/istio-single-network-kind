@@ -50,6 +50,14 @@ polling — proves the cross-trust-domain mTLS mechanism without adding a
 second moving part (bundle-endpoint reachability/refresh) that isn't what
 this experiment is actually testing. Noted as a natural follow-up.
 
+## 最終選定版本：完整安裝步驟
+
+最後選定 Controller Manager + `ClusterSPIFFEID` + Istio 原生 SDS 這條路
+（Phase 3 + Phase 4 的組合，不含 Phase 1-2 的自訂 Gateway 做法）。完整、
+可重現的安裝步驟與每一條指令，見同目錄
+[`INSTALL_CONTROLLER_MANAGER_VERSION.md`](./INSTALL_CONTROLLER_MANAGER_VERSION.md)。
+下面的 Phase 1-4 是過程記錄（含踩過的坑與被放棄的做法），不是安裝指南。
+
 ## Status
 
 ### Phase 1 — SPIRE control plane: done
@@ -331,3 +339,83 @@ hello from mcp-echo-spire via native Istio+SPIRE sidecar SDS
 
 兩條路都驗證過、都能用，各有取捨，寫在這裡給你自己選要留哪一套當正式
 參考。
+
+## Phase 4 — 加裝 SPIRE Controller Manager，改用 `ClusterSPIFFEID` CRD 宣告式管理 entry
+
+Phase 1-3 的 registration entry 都是手動跑 `spire-server entry create`/
+`entry update`（透過 kubectl exec 直接呼叫 CLI）。改成官方文件裡的
+`ClusterSPIFFEID` CRD 宣告式寫法——這需要另外裝 **SPIRE Controller
+Manager**，因為 `ClusterSPIFFEID` 這個 CRD 本身是它在定義、也是它在
+watch，我原本手刻的 SPIRE Server/Agent 完全沒有這個元件。
+
+### 架構
+`spire-controller-manager` 不是獨立部署，是照官方 `helm-charts-hardened`
+的模式，當成**第二個 container 塞進既有的 `spire-server` StatefulSet
+裡**（同一個 pod），兩個 container 共用一個 emptyDir 掛 spire-server 的
+本機 admin socket（`/tmp/spire-server/private/api.sock`）——controller-manager
+就是透過這個 local socket 呼叫 spire-server 的管理 API 來建/刪
+entry，不用額外開 network port。三個叢集都裝了（因為三邊原本都各自手動
+建過 entry）。
+
+裝的東西：
+- 從 `spire-controller-manager` 官方 repo 抓 `ClusterSPIFFEID` /
+  `ClusterFederatedTrustDomain` 這兩個 CRD 直接 apply（`manifests/crds/`）
+- controller-manager container：image
+  `ghcr.io/spiffe/spire-controller-manager:0.7.0`，讀一份
+  `ControllerManagerConfig`（`trustDomain`、`clusterName`、
+  `parentIDTemplate` 等，照抄官方 Helm chart 的預設值）
+- RBAC：一個 namespace 內的 leader-election Role/RoleBinding，加一個
+  cluster-scope 的 ClusterRole/ClusterRoleBinding（要能讀
+  namespaces/nodes/endpoints/pods，加上管理
+  `clusterspiffeids`/`clusterfederatedtrustdomains`/`clusterstaticentries`
+  這幾個 CRD 資源）
+- 手動建的 3 條 entry 全刪掉，改成 3 個 `ClusterSPIFFEID` 資源
+  （`agent-workload` × 2 個叢集、`mcp-ingress-workload` +
+  `mcp-echo-spire-workload` 在 cluster2-134），寫法就是官方文件那種
+  `workloadSelectorTemplates` + `federatesWith`
+
+### 踩坑記錄（Phase 4）
+
+**RBAC 漏了一條權限，controller-manager 卡在 watch Endpoints 失敗。**
+第一次裝完，controller-manager container 一直噴
+`endpoints is forbidden: User "system:serviceaccount:spire:spire-server"
+cannot list resource "endpoints"`。官方 ClusterRole 裡其實有這條
+（`resources: ["endpoints"]`），我自己抄的時候少抄了一行。補上重新
+apply、重啟 spire-server pod 就好。
+
+**改 StatefulSet 加 sidecar，順便暴露了一個早就存在的問題：
+spire-server 的資料是放在 `emptyDir`，不是 PVC，重啟 pod 資料就整個歸
+零。** 這不是 Controller Manager 造成的，是 Phase 1 一開始
+`gen_spire_cluster.py` 圖方便用 `emptyDir` 留下的坑，這次為了加 sidecar
+必須重建 StatefulSet 的 pod，才第一次真的踩到——`spire-server entry
+delete` 對舊 entry ID 全部回報 `NotFound`，`bundle list` 也是空的，因為
+整個 sqlite datastore 被清空重來。修法：**每次 spire-server pod 重啟
+後，federation 的 bundle 交換要重做一次**（entry 這次改用
+`ClusterSPIFFEID` 就不用管了，controller-manager 會自動照 CR 重建）。
+真的要做久一點的 lab，`spire-data` 這個 volume 應該換成有 PVC 的
+StatefulSet volumeClaimTemplate，不要用 emptyDir。
+
+**Controller Manager 會幫每一個「曾經匹配過的 pod」各建一條 entry
+（selector 裡帶 `k8s:pod-uid:<uid>`），舊 pod 刪掉後不會立刻消失，會有
+一段時間看起來像洩漏。** 這次因為前面 Phase 1-3 反覆刪重建了很多次
+`agent`/`mcp-echo-spire` pod，一查 `entry show` 一口氣冒出 17～20 條
+「同一個 workload」的 entry，第一眼以為是重複建立的 bug。查
+controller-manager 的 log 才確認：**GC 其實有在跑**（預設 10 秒一次），
+只是要等它偵測到「這個 pod UID 對應的 pod 真的已經從 K8s 消失」才會刪，
+這次是把好幾輪 debug 期間刪掉的 pod 一次累積下來，不是壞掉，只是需要一點
+時間慢慢清完（log 裡看得到 `entry-reconciler Deleted entry` 這種訊息，
+證實它真的在動作）。
+
+### 結果
+
+兩組配對，改用 `ClusterSPIFFEID` 建的 entry 一樣通：
+```
+$ curl (agent pod, entry 由 ClusterSPIFFEID 自動建立) -> mcp-echo-spire:30444
+hello from mcp-echo-spire via native Istio+SPIRE sidecar SDS
+```
+`cluster1-134 → cluster2-134`、`cluster2 → cluster2-134` 都成功，跟
+Phase 3 手動建 entry 時的結果一致——**證明 entry 是手動 CLI 建的還是
+Controller Manager 自動建的，對最終的 mTLS 結果沒有差別**，純粹是維運
+方式的選擇：workload 數量固定、變動不頻繁時手動 CLI 更直接；workload
+會隨時間持續增減、想要 GitOps 化管理時，`ClusterSPIFFEID` 這條路才有
+意義。

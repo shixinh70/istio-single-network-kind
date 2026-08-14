@@ -5,7 +5,10 @@ import sys
 # datastore) + SPIRE Agent (DaemonSet) manifest for one cluster, k8s_psat
 # node attestation, insecure_bootstrap (lab-only shortcut — agent trusts
 # the server on first contact without a pre-shared bootstrap bundle; fine
-# for a Kind lab, not for production).
+# for a Kind lab, not for production). Socket filename is literally
+# "socket" (not e.g. "agent.sock") to match istio-agent/Envoy's hardcoded
+# expectation at /run/secrets/workload-spiffe-uds/socket for the native
+# SPIRE SDS integration — see istio.io/latest/docs/ops/integrations/spire/.
 
 cluster_name = sys.argv[1]
 trust_domain = sys.argv[2]
@@ -178,7 +181,7 @@ data:
       server_address = "spire-server.spire.svc.cluster.local"
       server_port = "8081"
       trust_domain = "{trust_domain}"
-      socket_path = "/run/spire/sockets/agent.sock"
+      socket_path = "/run/spire/sockets/socket"
       insecure_bootstrap = true
     }}
     plugins {{
