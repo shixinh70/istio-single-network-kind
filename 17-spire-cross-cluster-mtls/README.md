@@ -114,9 +114,107 @@ apiserver 因為之前一次 docker 重啟後 serving cert 遺失、目前還是
 跟 SPIRE 本身無關。跨叢集配對只需要 `cluster2` 一台就夠了，故意跳過修
 `cluster1`。
 
-### Phase 2 — next
-Registration entries (agent workload identity per client cluster, mcp
-ingress gateway identity on `cluster2-134`), `spiffe-helper` sidecars to
-materialize SVID+bundle as a k8s Secret, new Istio `Gateway` listener with
-`tls.credentialName`, then end-to-end mTLS test for both pairings while
-confirming existing istiod-mTLS traffic is undisturbed.
+### Phase 2 — done: both pairings verified end-to-end
+
+**Result: both pairings work.**
+```
+$ curl (agent pod, SPIRE client cert) -> mcp-ingressgateway:30443 (SPIRE server cert, MUTUAL)
+hello from mcp-echo via SPIRE mTLS
+```
+Confirmed for both `cluster1-134 → cluster2-134` and `cluster2 → cluster2-134`
+— i.e. the cross-version pairing (Istio 1.13.5/k8s 1.24 client talking to
+Istio 1.29.6/k8s 1.34 server) works exactly the same as the same-version one.
+
+**Dual-track confirmed**: `istio-ingressgateway` (the default, pre-existing
+gateway) has been `Running` with **0 restarts** for its entire 5-day-plus
+uptime — completely undisturbed. No `PeerAuthentication` resource was ever
+touched (`kubectl get peerauthentication -A` → none, mesh-wide default still
+implicit PERMISSIVE). The mesh's own trust domain is still `cluster.local`
+(istiod's own CA), entirely separate from the `*.local` SPIRE trust domains
+used here. Everything SPIRE-related lives in new, additive resources
+(`mcp-gw` namespace, `mcp-ingressgateway` Deployment, a new `Gateway`
+resource on a new port) — nothing existing was edited.
+
+### Workload setup
+- **Registration entries** (`spire-server entry create`, parent ID = the
+  cluster's single schedulable node's SPIRE Agent — each Kind cluster here
+  has exactly one untainted `-worker` node, so exactly one relevant agent):
+  `spiffe://cluster1-134.local/agent` (ns `agent`, sa `agent`),
+  `spiffe://cluster2.local/agent` (same), `spiffe://cluster2-134.local/mcp-ingress`
+  (ns `mcp-gw`, sa `mcp-ingressgateway`) — each also given
+  `-federatesWith` pointing at its peer trust domain(s), see gotcha below.
+- **Agent pods** (`manifests/agent-pod.yaml`, same file applied to both
+  `cluster1-134` and `cluster2`): `app` container (curl) + `spiffe-helper`
+  sidecar writing SVID/key/bundle to a shared `emptyDir`.
+- **`mcp-ingress` gateway** (`manifests/mcp-ingress.yaml` +
+  `manifests/mcp-gateway.yaml`, `cluster2-134` only): a Deployment using
+  Istio's **gateway injection** (`inject.istio.io/templates: gateway`
+  annotation — produces a standalone `istio-proxy`-only gateway pod, no
+  Helm-managed ingressgateway install needed) plus two extra sidecars:
+  `spiffe-helper` (SVID → local files) and `secret-sync` (a plain `alpine`
+  container doing `curl` against the K8s API with its own ServiceAccount
+  token — no `kubectl` binary needed — to push those files into a
+  `kubernetes.io/tls`-typed Secret every 30s, since Istio's `Gateway.tls.
+  credentialName` reads from a K8s Secret via SDS, not local files). A new
+  `Gateway` resource adds a second listener (port 15443, `protocol: TLS`,
+  `tls.mode: MUTUAL`, `credentialName: mcp-spire-cert`) alongside whatever
+  the default gateway already serves — this workload is a **separate**
+  Deployment from the mesh's default `istio-ingressgateway`, so the
+  dual-track separation is structural, not just configuration-level.
+  Exposed as `NodePort` (30443) since Kind clusters here share one flat
+  Docker network — the simplest way to get real cross-cluster L3
+  reachability in this lab without standing up a proper multi-cluster
+  gateway/east-west setup.
+
+### 安裝過程踩坑記錄（續 — Phase 2）
+
+**SPIRE server 之間交換完 bundle，不代表 workload 就自動拿得到聯邦後的信任
+清單。** `spire-server bundle set` 只讓 **server** 知道對方的 root CA，個別
+workload 要透過自己的 Workload API stream 拿到這份 bundle，前提是它的
+registration entry 有明確宣告 `-federatesWith spiffe://<對方trust
+domain>`——沒宣告的話 `ca.crt` 永遠只會有自己 trust domain 的根憑證，跨
+domain 驗證 server 憑證就會失敗。用 `spire-server entry update ...
+-federatesWith` 補上去解決。
+
+**entry 加了 `-federatesWith` 還不夠，`spiffe-helper` 自己也要另外開關**：
+`helper.conf` 裡要加 `include_federated_domains = true`。沒開的話，那個
+「合併後的單一 bundle 檔」還是只會有自己 trust domain 的憑證——症狀跟上面
+那個一模一樣，很容易誤以為是 entry 那邊沒修好，其實是另一層的開關沒開。
+
+**`spiffe-helper` 預設寫出來的 private key 權限太嚴，同一個 pod 裡的另一個
+container 讀不到。** 第二個 container（`app`，跑不同 UID，pod 沒設共用的
+`fsGroup`）讀 `/svids/tls.key` 時直接 `Permission denied`。curl 自己噴出來
+的錯誤訊息還很誤導人（顯示 `unable to set private key file: type PEM`，
+看起來像是格式問題，其實是權限問題）。用 `helper.conf` 裡的
+`key_file_mode = 0444`（全部可讀）解決——這在 lab 裡、只在單一 pod 內共用
+的 emptyDir 沒關係，正式環境不該這樣設。
+
+**Istio Gateway 用 `protocol: TLS` + `tls.mode: MUTUAL`（終止型，不是
+passthrough）時，要用 `VirtualService.tcp` route，不是 `.tls`。** 一開始
+用 `tls:` block 配 `sniHosts` 比對（畢竟 listener protocol 字面上就寫
+「TLS」，看起來很合理）——結果 istiod 悄悄把 listener 建出來了，但 log
+只留下一行不起眼的 `gateway mcp-gw/mcp-spire-gateway:15443 listener missed
+network filter`，Envoy 那邊實際上從頭到尾沒開 15443 這個 port，其他地方
+完全不會報錯。`tls:`/`sniHosts` 那個 routing block 是專門給
+**passthrough** 模式用的（Envoy 完全不解密，只靠 SNI 做路由決定，由
+backend 自己終止 TLS）；一旦 gateway 自己終止 TLS（`SIMPLE`/`MUTUAL`），
+出來的東西就只是解密後的 TCP，istiod 產生 gateway 設定的邏輯在這種情況下
+只會從 `.tcp` route 建 filter chain（[官方已知行為](https://github.com/istio/istio/issues/37293)）。
+改成 `tcp:` 的 match/route block（只比對 port，不用 `sniHosts`——反正解密
+後也沒有這個資訊了）解決。
+
+**SPIFFE 憑證本來就不帶一般 HTTP client 拿來比對 hostname 的 DNS
+SAN/CN——這是設計如此，不是 bug。** `curl`（不加 `-k`）完整走完一次真正的
+TLS 1.3 雙向握手（雙方都交換了憑證，也對著聯邦後的 bundle 驗證過信任鏈），
+最後才失敗在 `SSL: unable to obtain common name from peer certificate`——
+也就是說信任鏈驗證是真的成功了，只有 hostname 比對這一步（SPIFFE 憑證根本
+沒填這個資訊）失敗。用 `-k`（剛好只跳過這一步驗證）重跑一次、拿到完整正確
+的 HTTP 回應，確認了這個判讀是對的。真正的 client 應該要去驗證對方的
+SPIFFE ID（URI SAN），而不是依賴 hostname 比對——這部分不在這次 lab 的
+範圍內，用 `-k` 已經足夠證明 mTLS 這一層本身是通的。
+
+**另一個跟 SPIRE 無關的小狀況**：gateway 的 ALPN 跟 client 談成了 `h2`，但
+單純的 HTTP `hashicorp/http-echo` backend 只會講 HTTP/1.1——
+`curl: (16) Remote peer returned unexpected data while we expected SETTINGS
+frame`。在 client 端加 `--http1.1` 解決。跟 SPIRE 或雙軌制都無關，只是
+TLS 這層一通了，才浮現出 backend 能力不匹配的問題。

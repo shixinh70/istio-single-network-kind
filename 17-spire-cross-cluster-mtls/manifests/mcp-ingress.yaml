@@ -1,0 +1,189 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: mcp-gw
+  labels:
+    istio-injection: enabled
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: mcp-ingressgateway
+  namespace: mcp-gw
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: mcp-spire-secret-writer
+  namespace: mcp-gw
+rules:
+- apiGroups: [""]
+  resources: ["secrets"]
+  verbs: ["get", "list", "create", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: mcp-spire-secret-writer-binding
+  namespace: mcp-gw
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: mcp-spire-secret-writer
+subjects:
+- kind: ServiceAccount
+  name: mcp-ingressgateway
+  namespace: mcp-gw
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: spiffe-helper-conf
+  namespace: mcp-gw
+data:
+  helper.conf: |
+    agent_address = "/run/spire/sockets/agent.sock"
+    cert_dir = "/svids"
+    daemon_mode = true
+    svid_file_name = "tls.crt"
+    svid_key_file_name = "tls.key"
+    svid_bundle_file_name = "ca.crt"
+    include_federated_domains = true
+    key_file_mode = 0444
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mcp-secret-sync-script
+  namespace: mcp-gw
+data:
+  sync.sh: |
+    #!/bin/sh
+    set -eu
+    apk add --no-cache curl jq >/dev/null
+    NS=mcp-gw
+    SECRET=mcp-spire-cert
+    TOKEN_FILE=/var/run/secrets/kubernetes.io/serviceaccount/token
+    CACERT=/var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+    APISERVER=https://kubernetes.default.svc
+    while true; do
+      if [ -f /svids/tls.crt ] && [ -f /svids/tls.key ] && [ -f /svids/ca.crt ]; then
+        TOKEN=$(cat "$TOKEN_FILE")
+        BODY=$(jq -n \
+          --arg crt "$(cat /svids/tls.crt)" \
+          --arg key "$(cat /svids/tls.key)" \
+          --arg ca "$(cat /svids/ca.crt)" \
+          --arg ns "$NS" --arg name "$SECRET" \
+          '{apiVersion:"v1",kind:"Secret",metadata:{name:$name,namespace:$ns},type:"kubernetes.io/tls",stringData:{"tls.crt":$crt,"tls.key":$key,"ca.crt":$ca}}')
+        curl -sS -X DELETE -H "Authorization: Bearer $TOKEN" --cacert "$CACERT" \
+          "$APISERVER/api/v1/namespaces/$NS/secrets/$SECRET" >/dev/null 2>&1 || true
+        curl -sS -X POST -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+          --cacert "$CACERT" -d "$BODY" \
+          "$APISERVER/api/v1/namespaces/$NS/secrets" >/tmp/last-sync.json 2>&1
+        echo "$(date -Iseconds) synced secret $SECRET"
+      fi
+      sleep 30
+    done
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mcp-ingressgateway
+  namespace: mcp-gw
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      istio: mcp-ingressgateway
+  template:
+    metadata:
+      labels:
+        istio: mcp-ingressgateway
+        sidecar.istio.io/inject: "true"
+      annotations:
+        inject.istio.io/templates: "gateway"
+    spec:
+      serviceAccountName: mcp-ingressgateway
+      containers:
+      - name: spiffe-helper
+        image: ghcr.io/spiffe/spiffe-helper:0.9.0
+        args: ["-config", "/run/spiffe-helper/helper.conf"]
+        volumeMounts:
+        - name: spire-agent-socket
+          mountPath: /run/spire/sockets
+          readOnly: true
+        - name: svids
+          mountPath: /svids
+        - name: helper-config
+          mountPath: /run/spiffe-helper
+      - name: secret-sync
+        image: alpine:3.20
+        command: ["/bin/sh", "/script/sync.sh"]
+        volumeMounts:
+        - name: svids
+          mountPath: /svids
+          readOnly: true
+        - name: sync-script
+          mountPath: /script
+      volumes:
+      - name: spire-agent-socket
+        hostPath:
+          path: /run/spire/sockets
+          type: Directory
+      - name: svids
+        emptyDir: {}
+      - name: helper-config
+        configMap:
+          name: spiffe-helper-conf
+      - name: sync-script
+        configMap:
+          name: mcp-secret-sync-script
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mcp-ingressgateway
+  namespace: mcp-gw
+  labels:
+    istio: mcp-ingressgateway
+spec:
+  selector:
+    istio: mcp-ingressgateway
+  ports:
+  - name: tls-spire
+    port: 15443
+    targetPort: 15443
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mcp-echo
+  namespace: mcp-gw
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mcp-echo
+  template:
+    metadata:
+      labels:
+        app: mcp-echo
+    spec:
+      containers:
+      - name: echo
+        image: hashicorp/http-echo:1.0.0
+        args: ["-text=hello from mcp-echo via SPIRE mTLS", "-listen=:8080"]
+        ports:
+        - containerPort: 8080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mcp-echo
+  namespace: mcp-gw
+spec:
+  selector:
+    app: mcp-echo
+  ports:
+  - port: 8080
+    targetPort: 8080

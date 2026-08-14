@@ -1,0 +1,64 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: agent
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: agent
+  namespace: agent
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: spiffe-helper-conf
+  namespace: agent
+data:
+  helper.conf: |
+    agent_address = "/run/spire/sockets/agent.sock"
+    cert_dir = "/svids"
+    daemon_mode = true
+    svid_file_name = "tls.crt"
+    svid_key_file_name = "tls.key"
+    svid_bundle_file_name = "ca.crt"
+    include_federated_domains = true
+    key_file_mode = 0444
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: agent
+  namespace: agent
+  labels:
+    app: agent
+spec:
+  serviceAccountName: agent
+  containers:
+  - name: app
+    image: curlimages/curl:8.16.0
+    command: ["sleep", "infinity"]
+    volumeMounts:
+    - name: svids
+      mountPath: /svids
+  - name: spiffe-helper
+    image: ghcr.io/spiffe/spiffe-helper:0.9.0
+    args: ["-config", "/run/spiffe-helper/helper.conf"]
+    volumeMounts:
+    - name: spire-agent-socket
+      mountPath: /run/spire/sockets
+      readOnly: true
+    - name: svids
+      mountPath: /svids
+    - name: helper-config
+      mountPath: /run/spiffe-helper
+  volumes:
+  - name: spire-agent-socket
+    hostPath:
+      path: /run/spire/sockets
+      type: Directory
+  - name: svids
+    emptyDir: {}
+  - name: helper-config
+    configMap:
+      name: spiffe-helper-conf

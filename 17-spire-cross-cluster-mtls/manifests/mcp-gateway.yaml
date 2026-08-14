@@ -1,0 +1,37 @@
+apiVersion: networking.istio.io/v1beta1
+kind: Gateway
+metadata:
+  name: mcp-spire-gateway
+  namespace: mcp-gw
+spec:
+  selector:
+    istio: mcp-ingressgateway
+  servers:
+  - port:
+      number: 15443
+      name: tls-spire
+      protocol: TLS
+    tls:
+      mode: MUTUAL
+      credentialName: mcp-spire-cert
+    hosts:
+    - "mcp-echo.mcp-gw.svc.cluster.local"
+---
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: mcp-echo-via-spire
+  namespace: mcp-gw
+spec:
+  hosts:
+  - "mcp-echo.mcp-gw.svc.cluster.local"
+  gateways:
+  - mcp-spire-gateway
+  tcp:
+  - match:
+    - port: 15443
+    route:
+    - destination:
+        host: mcp-echo.mcp-gw.svc.cluster.local
+        port:
+          number: 8080
