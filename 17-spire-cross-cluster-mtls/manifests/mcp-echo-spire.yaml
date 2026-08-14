@@ -1,0 +1,57 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: mcp-echo-spire
+  namespace: mcp-gw
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mcp-echo-spire
+  namespace: mcp-gw
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mcp-echo-spire
+  template:
+    metadata:
+      labels:
+        app: mcp-echo-spire
+        spiffe.io/spire-managed-identity: "true"
+      annotations:
+        inject.istio.io/templates: "sidecar,spire"
+    spec:
+      serviceAccountName: mcp-echo-spire
+      containers:
+      - name: echo
+        image: hashicorp/http-echo:1.0.0
+        args: ["-text=hello from mcp-echo-spire via native Istio+SPIRE sidecar SDS", "-listen=:8080"]
+        ports:
+        - containerPort: 8080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mcp-echo-spire
+  namespace: mcp-gw
+spec:
+  type: NodePort
+  selector:
+    app: mcp-echo-spire
+  ports:
+  - port: 8080
+    targetPort: 8080
+    nodePort: 30444
+---
+apiVersion: security.istio.io/v1
+kind: PeerAuthentication
+metadata:
+  name: mcp-echo-spire-strict
+  namespace: mcp-gw
+spec:
+  selector:
+    matchLabels:
+      app: mcp-echo-spire
+  mtls:
+    mode: STRICT

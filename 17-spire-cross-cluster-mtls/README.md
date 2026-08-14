@@ -218,3 +218,116 @@ SPIFFE ID（URI SAN），而不是依賴 hostname 比對——這部分不在這
 `curl: (16) Remote peer returned unexpected data while we expected SETTINGS
 frame`。在 client 端加 `--http1.1` 解決。跟 SPIRE 或雙軌制都無關，只是
 TLS 這層一通了，才浮現出 backend 能力不匹配的問題。
+
+## Phase 3 — 改用 Istio 原生的 per-pod SPIRE 機制（參考 [istio.io 官方 SPIRE 整合文件](https://istio.io/latest/docs/ops/integrations/spire/)）
+
+Phase 1-2 的做法（自訂 Gateway port + spiffe-helper + 手動同步 K8s Secret）
+確實能動，但真的偏複雜。這裡改用 Istio 官方文件描述的原生機制：讓
+`istio-agent` 自己的 SDS 直接去讀 SPIRE 提供的 Workload API socket（透過
+`spiffe-csi-driver` 掛進 pod），完全不用自己寫 Secret 同步腳本，也不用開
+額外的 Gateway port——**per-pod opt-in，istiod 本身零改動**（只有一個例外，
+見下面 federation 那段）。
+
+### 新架構
+- 部署 `spiffe-csi-driver`（SPIRE 官方 CSI driver，讓 pod 可以用
+  ephemeral inline volume 掛進 SPIRE agent 的 socket），只裝在
+  `cluster2-134`（這次簡化只重做 server 端）。
+- 在 `istio-sidecar-injector` 這個 ConfigMap 裡加一個新的 `spire`
+  injection template（直接照官方文件的內容），讓打了
+  `spiffe.io/spire-managed-identity: "true"` label +
+  `inject.istio.io/templates: "sidecar,spire"` annotation 的 pod，會多掛一個
+  CSI volume 到 `istio-proxy` 這個 initContainer（native sidecar 模式）。
+- 新增一個乾淨的 workload `mcp-echo-spire`（沒有動 Phase 1-2 原本的
+  `mcp-ingressgateway`/`mcp-echo`，兩套並存），搭配一個只 scope 到這個
+  workload 的 `PeerAuthentication`（`mode: STRICT`）。
+- Client 端（agent pod）完全沒動，還是 Phase 1-2 那套 spiffe-helper +
+  raw curl，因為簡化的重點在 server 端「怎麼把 SPIRE 憑證餵給 Envoy」，
+  client 端本來就已經很單純了。
+
+### 踩坑記錄（Phase 3）
+
+**istio-agent 自己想在 CSI 掛進來的同一個路徑建立它自己的 SDS
+socket，撞在一起。** 一開始直接照官方文件的 template 掛，結果 log 一直噴
+`SDS grpc server for workload proxies failed to set up UDS: ... read-only
+file system`，Envoy 起不來（`Init:1/2` 卡住，`startupProbe` 一直失敗）。
+後來才確認：這個「掛在 read-only CSI volume 上」的失敗其實是**設計上預期
+會發生**的事——istio-agent 偵測到這個路徑已經是別人（SPIRE）的 socket、
+自己寫不進去，就會放棄自己開 SDS server，改讓 Envoy 直接跟那個既有 socket
+講話。log 裡另一行 `Existing workload SDS socket found ... Default Istio
+SDS Server will only serve files` + `Workload is using file mounted
+certificates. Skipping connecting to CA` 才是關鍵的成功訊號，前面那個
+`error` 等級的訊息其實是誤導人的雜訊，不是真正卡住的原因。
+
+**真正卡住 Envoy 起不來的原因，是 socket 檔名對不上。** SPIRE agent 我原本
+設定寫出來的檔案叫 `agent.sock`，但 istio-agent/Envoy 這條路徑寫死是要找
+一個檔名剛好叫 `socket` 的檔案（`/run/secrets/workload-spiffe-uds/socket`）。
+兩個名字對不上，Envoy 那邊直接是 `No such file or directory`。改
+`cluster2-134` 的 spire-agent `socket_path` 為
+`/run/spire/sockets/socket`（連帶把 Phase 1-2 mcp-ingress 的
+spiffe-helper 設定也一起改掉，避免它壞掉）就解決了。
+
+**mTLS handshake 第一次真的握手成功，但被拒絕，因為 federated bundle
+沒有自動包含在 Envoy 拿到的 ROOTCA 裡。** 這跟 Phase 2 遇到的
+`include_federated_domains` 是同一類問題，但**修法完全不同**，因為這次是
+SPIRE agent 內建 SDS server 直接餵給 Envoy，不是透過 spiffe-helper。SPIRE
+的 SDS 實作預設把「只有自己 trust domain」和「自己 + 所有 federated
+domain」拆成兩個不同名字的資源（預設分別叫 `ROOTCA` 和 `ALL`），而
+Istio/Envoy 寫死只會去要名字叫 `ROOTCA` 的那個。解法是利用這兩個資源名稱
+本身是可設定的這件事：在 spire-agent 設定的 **`sds { }` 子區塊**
+（一開始沒注意到要包一層 `sds{}`，直接放在 `agent{}` 底下會被判定成
+`Unknown configuration detected` 整個 crash）裡把 `default_bundle_name`
+（原本叫 `ROOTCA` 的那個「只有自己」）改名讓開，再把
+`default_all_bundles_name`（原本叫 `ALL` 的「自己+federated」）直接改名成
+`ROOTCA`——這樣 Istio 寫死要的那個名字，實際拿到的內容就是有包含
+federated bundle 的那份：
+
+```
+sds {
+  default_bundle_name = "ROOTCA_SELF_ONLY"
+  default_all_bundles_name = "ROOTCA"
+}
+```
+
+**最後一個坎：憑證信任鏈驗證過了，連線還是被砍，是 Istio 自己一個寫死的
+SAN 前綴限制。** 錯誤變成 client 端 `Send failure: Broken pipe`，看起來
+像是憑證問題但其實憑證早就驗過了。查 Envoy 的 listener config 才發現：
+`STRICT` PeerAuthentication 會讓 Istio 自動產生一條
+`match_subject_alt_names: [{prefix: "spiffe://cluster.local/"}]` 的規則
+——這是 mesh 自己的 trust domain（`cluster.local`），跟憑證是誰簽的完全
+無關，是**額外一層**、獨立於信任鏈驗證的 SAN 白名單檢查。SPIRE 簽的憑證
+SAN 是 `spiffe://cluster1-134.local/agent`，前綴對不上，直接被拒絕。
+
+這是這次簡化過程中**真正跟你原本的限制（不動 istiod 預設 CA 系統）擦邊**
+的地方：修法是在 istiod 的 `meshConfig` 裡加
+`trustDomainAliases: [cluster1-134.local, cluster2.local]`——嚴格說沒有
+換掉 CA 或 CA_ADDR，但這是 **mesh 全域**的 istiod 設定，會影響全 mesh 所有
+STRICT PeerAuthentication 的 SAN 比對規則，不是只限這一個 pod。跟你確認過
+（選了「加 trustDomainAliases」），才動手改的。
+
+### 結果
+
+兩組配對都通過，跟 Phase 1-2 的結論一致：
+```
+$ curl (agent pod, SPIRE client cert) -> mcp-echo-spire:30444 (native istio-agent SDS, SPIRE cert)
+hello from mcp-echo-spire via native Istio+SPIRE sidecar SDS
+```
+`cluster1-134 → cluster2-134` 和 `cluster2 → cluster2-134` 都成功。
+
+**雙軌制依然成立**：預設 `istio-ingressgateway` 開機 5 天多、0 次重啟；
+同一個 `mcp-gw` namespace 裡 Phase 1-2 的 `mcp-echo`（沒打 SPIRE label 的
+那個）憑證還是正常的 `spiffe://cluster.local/ns/mcp-gw/sa/default`，完全
+沒被 SPIRE 的東西影響；`PeerAuthentication` 只 scope 到 `mcp-echo-spire`
+這一個 workload，不是整個 namespace。
+
+### Phase 1-2 vs Phase 3 比較
+
+| | Phase 1-2（自訂 Gateway） | Phase 3（原生 CSI + injection template） |
+|---|---|---|
+| Server 端多開的東西 | 自訂 Gateway CR、新 port（15443）、`spiffe-helper`+`secret-sync` 兩個額外 sidecar、手寫的 K8s Secret 同步腳本 | 只有一個 label + annotation，讓現有 pod 自己的 istio-proxy 直接吃 SPIRE 憑證 |
+| 憑證怎麼餵給 Envoy | 手動把檔案轉成 K8s Secret，Envoy 透過 Istio 標準 SDS 讀 Secret | Envoy 直接跟 SPIRE agent 的 socket 講 SDS 協定，中間不經過 K8s Secret |
+| istiod 有沒有被動到 | 完全沒有 | 這次多了 `trustDomainAliases`（mesh 全域，但不換 CA） |
+| 跨 trust domain 需要額外處理 | 不用（自己手刻的 Gateway 不吃 mesh 的 SAN 限制邏輯） | 需要（撞到 STRICT PeerAuthentication 內建的 SAN 前綴限制） |
+| 複雜度來源 | 都在「我自己寫的膠水」——好懂但零件多 | 零件少，但踩坑都在「Istio/SPIRE 內部沒寫在檯面上的行為」，第一次抓錯誤點比較花時間 |
+
+兩條路都驗證過、都能用，各有取捨，寫在這裡給你自己選要留哪一套當正式
+參考。
