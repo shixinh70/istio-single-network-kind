@@ -72,13 +72,13 @@ data:
     server {
       bind_address = "0.0.0.0"
       bind_port = "8081"
-      trust_domain = "cluster2-134.local"
+      trust_domain = "cluster2.local"
       data_dir = "/run/spire/data"
       log_level = "INFO"
       ca_subject = {
         country = ["US"],
         organization = ["spire-lab"],
-        common_name = "cluster2-134",
+        common_name = "cluster2",
       }
     }
     plugins {
@@ -91,7 +91,7 @@ data:
       NodeAttestor "k8s_psat" {
         plugin_data {
           clusters = {
-            "cluster2-134" = {
+            "cluster2" = {
               service_account_allow_list = ["spire:spire-agent"]
             }
           }
@@ -123,7 +123,7 @@ spec:
       serviceAccountName: spire-server
       containers:
       - name: spire-server
-        image: ghcr.io/spiffe/spire-server:1.11.2
+        image: <YOUR_REGISTRY>/spiffe/spire-server:1.11.2
         args: ["-config", "/run/spire/config/server.conf"]
         ports:
         - containerPort: 8081
@@ -164,14 +164,14 @@ data:
       log_level = "INFO"
       server_address = "spire-server.spire.svc.cluster.local"
       server_port = "8081"
-      trust_domain = "cluster2-134.local"
+      trust_domain = "cluster2.local"
       socket_path = "/run/spire/sockets/socket"
       insecure_bootstrap = true
     }
     plugins {
       NodeAttestor "k8s_psat" {
         plugin_data {
-          cluster = "cluster2-134"
+          cluster = "cluster2"
         }
       }
       KeyManager "memory" {
@@ -204,7 +204,7 @@ spec:
       serviceAccountName: spire-agent
       containers:
       - name: spire-agent
-        image: ghcr.io/spiffe/spire-agent:1.11.2
+        image: <YOUR_REGISTRY>/spiffe/spire-agent:1.11.2
         args: ["-config", "/run/spire/config/agent.conf"]
         volumeMounts:
         - name: spire-config

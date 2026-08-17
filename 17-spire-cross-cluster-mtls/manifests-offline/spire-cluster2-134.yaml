@@ -123,7 +123,7 @@ spec:
       serviceAccountName: spire-server
       containers:
       - name: spire-server
-        image: ghcr.io/spiffe/spire-server:1.11.2
+        image: <YOUR_REGISTRY>/spiffe/spire-server:1.11.2
         args: ["-config", "/run/spire/config/server.conf"]
         ports:
         - containerPort: 8081
@@ -204,7 +204,7 @@ spec:
       serviceAccountName: spire-agent
       containers:
       - name: spire-agent
-        image: ghcr.io/spiffe/spire-agent:1.11.2
+        image: <YOUR_REGISTRY>/spiffe/spire-agent:1.11.2
         args: ["-config", "/run/spire/config/agent.conf"]
         volumeMounts:
         - name: spire-config

@@ -58,6 +58,10 @@ this experiment is actually testing. Noted as a natural follow-up.
 [`INSTALL_CONTROLLER_MANAGER_VERSION.md`](./INSTALL_CONTROLLER_MANAGER_VERSION.md)。
 下面的 Phase 1-4 是過程記錄（含踩過的坑與被放棄的做法），不是安裝指南。
 
+**要裝進沒有對外網路的環境**，見
+[`OFFLINE_INSTALL.md`](./OFFLINE_INSTALL.md)——image 清單、pre-render 好
+的 manifest（改指到你自己的 private registry）、跟上面安裝指南怎麼銜接。
+
 ## Status
 
 ### Phase 1 — SPIRE control plane: done

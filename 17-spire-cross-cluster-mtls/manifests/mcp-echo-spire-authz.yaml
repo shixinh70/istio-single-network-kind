@@ -1,0 +1,15 @@
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: mcp-echo-spire-only-cluster1-134
+  namespace: mcp-gw
+spec:
+  selector:
+    matchLabels:
+      app: mcp-echo-spire
+  action: ALLOW
+  rules:
+  - from:
+    - source:
+        principals:
+        - "cluster1-134.local/agent"

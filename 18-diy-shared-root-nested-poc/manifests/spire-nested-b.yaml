@@ -1,24 +1,19 @@
 apiVersion: v1
-kind: Namespace
-metadata:
-  name: spire
----
-apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: spire-server
-  namespace: spire
+  namespace: spire-nested-b
 ---
 apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: spire-agent
-  namespace: spire
+  namespace: spire-nested-b
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: spire-server-trust-role
+  name: spire-nested-b-server-trust-role
 rules:
 - apiGroups: ["authentication.k8s.io"]
   resources: ["tokenreviews"]
@@ -30,20 +25,20 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: spire-server-trust-role-binding
+  name: spire-nested-b-server-trust-role-binding
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: spire-server-trust-role
+  name: spire-nested-b-server-trust-role
 subjects:
 - kind: ServiceAccount
   name: spire-server
-  namespace: spire
+  namespace: spire-nested-b
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: spire-agent-node-role
+  name: spire-nested-b-agent-node-role
 rules:
 - apiGroups: [""]
   resources: ["pods", "nodes", "nodes/proxy"]
@@ -52,33 +47,33 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: spire-agent-node-role-binding
+  name: spire-nested-b-agent-node-role-binding
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: spire-agent-node-role
+  name: spire-nested-b-agent-node-role
 subjects:
 - kind: ServiceAccount
   name: spire-agent
-  namespace: spire
+  namespace: spire-nested-b
 ---
 apiVersion: v1
 kind: ConfigMap
 metadata:
   name: spire-server-conf
-  namespace: spire
+  namespace: spire-nested-b
 data:
   server.conf: |
     server {
       bind_address = "0.0.0.0"
       bind_port = "8081"
-      trust_domain = "cluster2-134.local"
+      trust_domain = "diy-shared.local"
       data_dir = "/run/spire/data"
       log_level = "INFO"
       ca_subject = {
         country = ["US"],
         organization = ["spire-lab"],
-        common_name = "cluster2-134",
+        common_name = "nested-b",
       }
     }
     plugins {
@@ -91,8 +86,8 @@ data:
       NodeAttestor "k8s_psat" {
         plugin_data {
           clusters = {
-            "cluster2-134" = {
-              service_account_allow_list = ["spire:spire-agent"]
+            "spire-nested-b" = {
+              service_account_allow_list = ["spire-nested-b:spire-agent"]
             }
           }
         }
@@ -102,13 +97,20 @@ data:
           keys_path = "/run/spire/data/keys.json"
         }
       }
+      UpstreamAuthority "disk" {
+        plugin_data {
+          cert_file_path = "/run/spire/diy-ca/intermediate.crt"
+          key_file_path = "/run/spire/diy-ca/intermediate.key"
+          bundle_file_path = "/run/spire/diy-ca/root.crt"
+        }
+      }
     }
 ---
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
   name: spire-server
-  namespace: spire
+  namespace: spire-nested-b
 spec:
   serviceName: spire-server
   replicas: 1
@@ -133,18 +135,24 @@ spec:
           readOnly: true
         - name: spire-data
           mountPath: /run/spire/data
+        - name: diy-ca
+          mountPath: /run/spire/diy-ca
+          readOnly: true
       volumes:
       - name: spire-config
         configMap:
           name: spire-server-conf
       - name: spire-data
         emptyDir: {}
+      - name: diy-ca
+        secret:
+          secretName: diy-intermediate
 ---
 apiVersion: v1
 kind: Service
 metadata:
   name: spire-server
-  namespace: spire
+  namespace: spire-nested-b
 spec:
   selector:
     app: spire-server
@@ -156,22 +164,22 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: spire-agent-conf
-  namespace: spire
+  namespace: spire-nested-b
 data:
   agent.conf: |
     agent {
       data_dir = "/run/spire"
       log_level = "INFO"
-      server_address = "spire-server.spire.svc.cluster.local"
+      server_address = "spire-server.spire-nested-b.svc.cluster.local"
       server_port = "8081"
-      trust_domain = "cluster2-134.local"
+      trust_domain = "diy-shared.local"
       socket_path = "/run/spire/sockets/socket"
       insecure_bootstrap = true
     }
     plugins {
       NodeAttestor "k8s_psat" {
         plugin_data {
-          cluster = "cluster2-134"
+          cluster = "spire-nested-b"
         }
       }
       KeyManager "memory" {
@@ -188,7 +196,7 @@ apiVersion: apps/v1
 kind: DaemonSet
 metadata:
   name: spire-agent
-  namespace: spire
+  namespace: spire-nested-b
 spec:
   selector:
     matchLabels:
@@ -221,8 +229,9 @@ spec:
         configMap:
           name: spire-agent-conf
       - name: spire-agent-socket
+        # 刻意用跟正式 `spire` namespace 不同的 hostPath，避免衝突
         hostPath:
-          path: /run/spire/sockets
+          path: /run/spire-nested-b/sockets
           type: DirectoryOrCreate
       - name: spire-token
         projected:

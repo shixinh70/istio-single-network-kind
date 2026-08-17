@@ -1,0 +1,11 @@
+apiVersion: spire.spiffe.io/v1alpha1
+kind: ClusterSPIFFEID
+metadata:
+  name: agent-workload
+spec:
+  spiffeIDTemplate: "spiffe://{{ .TrustDomain }}/agent"
+  workloadSelectorTemplates:
+    - "k8s:ns:agent"
+    - "k8s:sa:agent"
+  federatesWith:
+    - "cluster2-134.local"
