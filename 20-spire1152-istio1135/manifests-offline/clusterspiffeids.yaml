@@ -1,0 +1,12 @@
+apiVersion: spire.spiffe.io/v1alpha1
+kind: ClusterSPIFFEID
+metadata:
+  name: peer-client-workload
+spec:
+  spiffeIDTemplate: "spiffe://{{ .TrustDomain }}/cluster/{{ .ClusterName }}/peer-client"
+  namespaceSelector:
+    matchLabels:
+      kubernetes.io/metadata.name: peer-test-client
+  workloadSelectorTemplates:
+    - "k8s:ns:peer-test-client"
+    - "k8s:sa:peer-client"
