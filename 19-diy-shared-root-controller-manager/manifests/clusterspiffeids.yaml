@@ -1,0 +1,38 @@
+apiVersion: spire.spiffe.io/v1alpha1
+kind: ClusterSPIFFEID
+metadata:
+  name: agent-workload
+spec:
+  spiffeIDTemplate: "spiffe://{{ .TrustDomain }}/cluster/{{ .ClusterName }}/agent"
+  namespaceSelector:
+    matchLabels:
+      kubernetes.io/metadata.name: agent
+  workloadSelectorTemplates:
+    - "k8s:ns:agent"
+    - "k8s:sa:agent"
+---
+apiVersion: spire.spiffe.io/v1alpha1
+kind: ClusterSPIFFEID
+metadata:
+  name: mcp-ingress-workload
+spec:
+  spiffeIDTemplate: "spiffe://{{ .TrustDomain }}/cluster/{{ .ClusterName }}/mcp-ingress"
+  namespaceSelector:
+    matchLabels:
+      kubernetes.io/metadata.name: mcp-gw
+  workloadSelectorTemplates:
+    - "k8s:ns:mcp-gw"
+    - "k8s:sa:mcp-ingressgateway"
+---
+apiVersion: spire.spiffe.io/v1alpha1
+kind: ClusterSPIFFEID
+metadata:
+  name: mcp-echo-spire-workload
+spec:
+  spiffeIDTemplate: "spiffe://{{ .TrustDomain }}/cluster/{{ .ClusterName }}/mcp-echo-spire"
+  namespaceSelector:
+    matchLabels:
+      kubernetes.io/metadata.name: mcp-gw
+  workloadSelectorTemplates:
+    - "k8s:ns:mcp-gw"
+    - "k8s:sa:mcp-echo-spire"
