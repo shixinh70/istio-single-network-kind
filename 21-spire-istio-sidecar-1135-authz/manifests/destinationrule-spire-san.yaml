@@ -1,0 +1,23 @@
+# Auto mTLS generates the client's upstream validation_context SAN
+# expectation from the destination's k8s namespace/service-account
+# (spiffe://<trustDomainAlias>/ns/<ns>/sa/<sa>), since that's the only
+# identity shape istiod itself knows how to predict. Our ClusterSPIFFEID
+# template intentionally issues a different, custom path
+# (.../cluster/<clusterName>/<workload>) so client identity is
+# distinguishable per-cluster for the AuthorizationPolicy principals check.
+# Without this override the client's CERTIFICATE_VERIFY_FAILED's on the
+# real (correct) SPIRE-issued SAN because it doesn't match either
+# auto-guessed pattern.
+apiVersion: networking.istio.io/v1alpha3
+kind: DestinationRule
+metadata:
+  name: istio-server-spire-san
+  namespace: spire-istio-server
+spec:
+  host: istio-server.spire-istio-server.svc.cluster.local
+  trafficPolicy:
+    tls:
+      mode: ISTIO_MUTUAL
+      subjectAltNames:
+      - "spiffe://diy-1152.local/cluster/cluster1/istio-server"
+      - "spiffe://diy-1152.local/cluster/cluster2/istio-server"

@@ -1,0 +1,25 @@
+apiVersion: spire.spiffe.io/v1alpha1
+kind: ClusterSPIFFEID
+metadata:
+  name: istio-client-workload
+spec:
+  spiffeIDTemplate: "spiffe://{{ .TrustDomain }}/cluster/{{ .ClusterName }}/istio-client"
+  namespaceSelector:
+    matchLabels:
+      kubernetes.io/metadata.name: spire-istio-client
+  workloadSelectorTemplates:
+    - "k8s:ns:spire-istio-client"
+    - "k8s:sa:istio-client"
+---
+apiVersion: spire.spiffe.io/v1alpha1
+kind: ClusterSPIFFEID
+metadata:
+  name: istio-server-workload
+spec:
+  spiffeIDTemplate: "spiffe://{{ .TrustDomain }}/cluster/{{ .ClusterName }}/istio-server"
+  namespaceSelector:
+    matchLabels:
+      kubernetes.io/metadata.name: spire-istio-server
+  workloadSelectorTemplates:
+    - "k8s:ns:spire-istio-server"
+    - "k8s:sa:istio-server"

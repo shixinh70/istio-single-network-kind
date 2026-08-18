@@ -1,0 +1,84 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: spire-istio-server
+  labels:
+    istio-injection: enabled
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: istio-server
+  namespace: spire-istio-server
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: istio-server
+  namespace: spire-istio-server
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: istio-server
+  template:
+    metadata:
+      labels:
+        app: istio-server
+        spiffe.io/spire-managed-identity: "true"
+      annotations:
+        inject.istio.io/templates: "sidecar,spire"
+        proxy.istio.io/config: |
+          customConfigFile: "/etc/istio/custom-bootstrap/custom_bootstrap_full.json"
+    spec:
+      serviceAccountName: istio-server
+      containers:
+      - name: echo
+        image: hashicorp/http-echo:1.0.0
+        args: ["-text=hello from istio-server via SPIRE-issued cert on Istio 1.13.5", "-listen=:8080"]
+        ports:
+        - containerPort: 8080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: istio-server
+  namespace: spire-istio-server
+spec:
+  type: NodePort
+  selector:
+    app: istio-server
+  ports:
+  - port: 8080
+    targetPort: 8080
+    nodePort: 30643
+---
+apiVersion: security.istio.io/v1beta1
+kind: PeerAuthentication
+metadata:
+  name: istio-server-strict
+  namespace: spire-istio-server
+spec:
+  selector:
+    matchLabels:
+      app: istio-server
+  mtls:
+    mode: STRICT
+---
+# 只允許 cluster1 的 istio-client SPIFFE ID 連進來，其他一律拒絕
+# （principal 格式：<trust domain>/<SPIFFE ID 路徑，去掉 spiffe://>）
+apiVersion: security.istio.io/v1beta1
+kind: AuthorizationPolicy
+metadata:
+  name: istio-server-allow-cluster1-only
+  namespace: spire-istio-server
+spec:
+  selector:
+    matchLabels:
+      app: istio-server
+  action: ALLOW
+  rules:
+  - from:
+    - source:
+        principals:
+        - "diy-1152.local/cluster/cluster1/istio-client"
