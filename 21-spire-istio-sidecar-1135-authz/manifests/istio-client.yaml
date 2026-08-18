@@ -21,8 +21,10 @@ metadata:
     spiffe.io/spire-managed-identity: "true"
   annotations:
     inject.istio.io/templates: "sidecar,spire"
-    proxy.istio.io/config: |
-      customConfigFile: "/etc/istio/custom-bootstrap/custom_bootstrap_full.json"
+    # customConfigFile annotation is added in a LATER step (see README) —
+    # it can't be here from the start: pilot-agent would try to boot Envoy
+    # from that file on the very first start, before the file has any real
+    # content (it's generated FROM this pod's own first-boot bootstrap).
 spec:
   serviceAccountName: istio-client
   containers:

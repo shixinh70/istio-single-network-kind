@@ -1,137 +1,191 @@
 # Istio 1.13.5 + 真正的 istio-proxy sidecar + SPIRE 自訂身份 + AuthorizationPolicy principal 卡控
 
-## 目的
-延續 `19-diy-shared-root-controller-manager/`（DIY 共用 root + `ClusterSPIFFEID`）
-跟 `20-spire1152-istio1135/`（SPIRE 1.15.2 + Istio 1.13.5 相容性驗證），這次要
-做的是使用者最終確認的完整架構：
+完整、可離線、從零開始的安裝指南。目標架構：client、server 都掛真正的
+istio-proxy sidecar；SPIRE 發自訂 SPIFFE ID 給兩邊；server 用
+`AuthorizationPolicy` 的 `principals` 只放行特定叢集的 client；沒有標註
+的其他 pod 繼續用 istiod 內建 CA，完全不受影響；兩座叢集的 SPIRE 用同一顆
+離線 root 簽 intermediate（DIY shared-root，不用 federation/`bundle_set`）。
 
-- client、server **都掛真正的 istio-proxy sidecar**（不是 `20-` 那種繞過
-  mesh 直接用 `spiffe-helper` peer-to-peer）
-- SPIRE 發自訂 SPIFFE ID 給 client/server，**走 Istio 原生 mTLS**（不是
-  應用層自己接 mTLS）
-- server 用 `AuthorizationPolicy` 的 `principals` 卡控只有特定 client 能連
-- 沒有標註要用 SPIRE 身份的 sidecar，繼續正常用 istiod 內建 CA，兩邊互不
-  影響
-- SPIRE 之間用共同 root 簽 intermediate（DIY shared-root，沿用 `19-`/`20-`
-  的做法，不用 `bundle_set`/federation）
+架構原理跟為什麼要這樣設計，見同目錄下 [`AGENT-MESH-MTLS.md`](./AGENT-MESH-MTLS.md)。
 
-## 核心障礙：Istio 1.13.5 沒有原生 SPIRE socket 自動偵測
+## 前提
 
-Istio **1.14+** 的 istio-agent 會自動偵測
-`/run/secrets/workload-spiffe-uds/socket` 這個 UDS 存不存在，存在就直接跳過
-istiod CA，讓 Envoy 直接跟這個 socket 要憑證（`istio/istio#37947`，2022-03-31
-合併，`v1.14.0` 才第一次出現，`v1.13`/`v1.12`/`v1.11` 的官方文件頁面查證
-都是 404，用官方 GitHub API 直接找到那條 PR 確認）。**1.13.5 的
-istio-agent 完全沒有這段邏輯**——`spiffe-csi-driver` 掛好了、annotation
-下對了，sidecar 還是照樣去問 istiod 要憑證，日誌完全不會提到那個 socket。
+- 兩座叢集（這裡的 kubectl context 叫 `cluster1`／`cluster2`），**Istio
+  1.13.5** sidecar 模式已經裝好，`istioctl`/`kubectl` 都能連得上
+- `python3`（含標準函式庫即可，不需要額外套件）
+- 離線環境：所有 image 要先搬進你自己的 registry，見下面「Image 清單」
+  跟 [`OFFLINE_INSTALL.md`](./OFFLINE_INSTALL.md)
 
-這是版本硬限制，不是設定錯誤，所以整個 `21-` 要做的事，本質上就是**手動
-重現 1.14+ 自動做的那件事**。
+## Image 清單
 
-## 走過的三條路（記錄失敗原因，避免重踩）
+### 基礎設施 image（這次要新裝的東西，一定要）
 
-### 死路 1：EnvoyFilter `CLUSTER`/`ADD` 新增一個指向 SPIRE socket 的 cluster
+| Image | 用途 |
+|---|---|
+| `ghcr.io/spiffe/spire-server:1.15.2` | SPIRE Server |
+| `ghcr.io/spiffe/spire-agent:1.15.2` | SPIRE Agent（DaemonSet） |
+| `ghcr.io/spiffe/spire-controller-manager:0.7.0` | `ClusterSPIFFEID` 宣告式管理 entry |
+| `ghcr.io/spiffe/spiffe-csi-driver:0.2.7` | 把 SPIRE Agent socket 掛進 istio-proxy 的 CSI driver |
+| `registry.k8s.io/sig-storage/csi-node-driver-registrar:v2.6.0` | CSI driver 的 node registrar sidecar |
 
-理論上很直覺：加一個新 cluster 指到 SPIRE socket，再用 EnvoyFilter 把
-listener 的 TLS context 的 `sds_config` 指過去。實測直接被 Envoy 拒絕：
+### 這次 lab 測試用的範例 workload image（正式環境會換成你自己的 app）
 
-```
-Internal:Error adding/updating listener(s) virtualInbound: envoy.config.core.v3.ApiConfigSource
-must have a statically defined non-EDS cluster: 'spire_agent' does not exist, was added via api,
-or is an EDS cluster
-```
+| Image | 用途 |
+|---|---|
+| `hashicorp/http-echo:1.0.0` | server 端最小 echo backend |
+| `curlimages/curl:8.16.0` | client 端測試工具 |
 
-原因：Envoy 規定 `ApiConfigSource`（SDS 用的那個）**只能指向 bootstrap
-階段就存在的 STATIC cluster**（SDS 邏輯上早於 ADS 連線，不能依賴動態
-下發的 cluster）。EnvoyFilter 的 `CLUSTER`/`ADD` 是透過 CDS（也就是
-istiod 動態下發）加進去的，天生就不符合這個要求，無解。
+### 已經跑在叢集上的前提（不是這次新裝，只是列出來確認版本）
 
-### 死路 2：EnvoyFilter `BOOTSTRAP`/`MERGE`
-
-EnvoyFilter 確實有 `applyTo: BOOTSTRAP` 這個選項，理論上可以在 bootstrap
-產生階段就注入一個真正 STATIC 的 cluster。實測套用後完全沒有生效
-（`static_resources.clusters` 裡就是沒有出現）。原因：1.13.5 的
-istio-agent 產生 bootstrap 是**完全在本地、離線做的**（讀內建 Go
-template + `ProxyConfig`），過程中不會去問 istiod「有沒有適用的
-EnvoyFilter」——這個「先跟 istiod 要 bootstrap-relevant EnvoyFilter 再
-產生」的能力，在這個版本根本沒接上（同樣是版本落差問題，只是換了個地方
-出現）。
-
-### 死路 3：直接用 `sidecar.istio.io/bootstrapOverride` 重新定義既有的 `sds-grpc` cluster
-
-`bootstrapOverride` 這個機制是真的有效的（透過 pilot-agent 的
-`--config-yaml` 把 ConfigMap 內容跟預設 bootstrap **merge** 起來），一開始
-想說最省事的做法：既然所有 listener 的 SDS 都已經指向名叫 `sds-grpc` 的
-cluster，那就用這個機制把 `sds-grpc` **這個名字本身**重新定義成指向 SPIRE
-socket，這樣完全不用碰任何 listener/filter chain patch。結果 Envoy 啟動時
-直接 crash：
-
-```
-critical envoy main] error initializing configuration: cluster manager: duplicate cluster 'sds-grpc'
-```
-
-原因：`--config-yaml` 的 merge 對 repeated field（`static_resources.clusters`
-是一個 list）是**用 append 的，不是用 name 覆蓋**——同名的
-`sds-grpc` 變成兩個，Envoy 對 cluster 名稱做唯一性檢查，直接拒絕啟動。
-
-## 真正走通的路：`proxy.istio.io/config` 的 `customConfigFile`（完整替換 bootstrap，不是 merge）
-
-pilot-agent 除了「merge 一份 overlay 上去」的 `bootstrapOverride`，還有
-一個**完全替換**用來產生 bootstrap 的來源檔案的機制：`ProxyConfig` 的
-`customConfigFile` 欄位（透過 `proxy.istio.io/config` annotation 設定），
-對應到 pilot-agent 自己的 `--templateFile` flag。用這個機制提供一份**完整
-的、已經渲染好的 bootstrap JSON**（照抄這顆 pod 原本正常運作時的
-bootstrap，只把裡面 `sds-grpc` 這個 cluster 的 socket path 從
-`./etc/istio/proxy/SDS`（istio-agent 自己的本地 SDS server）改成
-`/run/secrets/workload-spiffe-uds/socket`（SPIRE Agent 的 socket，這個
-socket 是雙協定的，除了 SPIFFE Workload API 也直接支援 Envoy 原生 SDS
-協定）——因為是完整替換不是 merge，不會有 duplicate cluster 或 repeated
-field append 的問題。
-
-驗證結果（`pilot-agent request GET certs`，server 端）：
-```json
-"subject_alt_names": [{"uri": "spiffe://diy-1152.local/cluster/cluster2/istio-server"}]
-```
-Envoy 現在真的在用 SPIRE 簽的憑證，不是 istiod 的。istio-agent 自己內部
-那個 SDS server 還是照常啟動、照常跟 istiod 要憑證（log 還是會看到
-`generated new workload certificate`）——只是現在**沒有人接它**，因為
-`sds-grpc` 已經被指到別的地方去了，那份憑證變成孤兒，不影響任何實際流量。
+| Image | 說明 |
+|---|---|
+| `docker.io/istio/pilot:1.13.5` | istiod |
+| `docker.io/istio/proxyv2:1.13.5` | Istio sidecar |
 
 ## 完整安裝步驟
 
-沿用 `20-spire1152-istio1135/` 已經裝好的 SPIRE 1.15.2 控制平面
-（namespace `spire-1315`、trust domain `diy-1152.local`）。
+以下全部指令假設在 `21-spire-istio-sidecar-1135-authz/` 目錄下執行。離線
+環境把 `manifests/` 換成 `manifests-offline/`（見 `OFFLINE_INSTALL.md`）。
 
-### Step 1：spiffe-csi-driver（掛 SPIRE Agent socket 進 istio-proxy）
+### Step 1：CRD
+
+```bash
+for ctx in cluster1 cluster2; do
+  kubectl --context=$ctx apply -f manifests/crds/clusterspiffeids.yaml
+  kubectl --context=$ctx apply -f manifests/crds/clusterfederatedtrustdomains.yaml
+done
+```
+
+### Step 2：離線生成 DIY 共用 root + 兩份 intermediate
+
+```bash
+mkdir -p diy-pki && cd diy-pki
+openssl ecparam -name prime256v1 -genkey -noout -out root.key
+openssl req -x509 -new -key root.key -sha256 -days 3650 \
+  -subj "/O=spire-lab/CN=diy-1152-root" -out root.crt
+
+for c in cluster1 cluster2; do
+  openssl ecparam -name prime256v1 -genkey -noout -out int-$c.key
+  openssl req -new -key int-$c.key -subj "/O=spire-lab/CN=diy-intermediate-$c-1152" -out int-$c.csr
+  openssl x509 -req -in int-$c.csr -CA root.crt -CAkey root.key -CAcreateserial -days 1825 -sha256 \
+    -extfile <(printf "basicConstraints=critical,CA:true\nkeyUsage=critical,keyCertSign,cRLSign") \
+    -out int-$c.crt
+  openssl verify -CAfile root.crt int-$c.crt
+done
+cd ..
+```
+
+### Step 3：Secret + SPIRE Server/Agent/Controller Manager
+
+```bash
+for ctx_c in "cluster1:cluster1" "cluster2:cluster2"; do
+  ctx="${ctx_c%%:*}"; c="${ctx_c##*:}"
+  kubectl --context=$ctx create namespace spire-1315
+  kubectl --context=$ctx -n spire-1315 create secret generic diy-intermediate \
+    --from-file=intermediate.crt=diy-pki/int-$c.crt \
+    --from-file=intermediate.key=diy-pki/int-$c.key \
+    --from-file=root.crt=diy-pki/root.crt
+done
+
+kubectl --context=cluster1 apply -f manifests/spire-1152-cluster1.yaml
+kubectl --context=cluster2 apply -f manifests/spire-1152-cluster2.yaml
+```
+
+驗證兩邊 bundle 的 x509 root 完全一致（不需要任何 `bundle set`）：
+```bash
+for ctx in cluster1 cluster2; do
+  kubectl --context=$ctx -n spire-1315 exec spire-server-0 -c spire-server -- \
+    /opt/spire/bin/spire-server bundle show -format spiffe | \
+    python3 -c "import json,sys,hashlib; d=json.load(sys.stdin); [print(hashlib.sha256(k['x5c'][0].encode()).hexdigest()[:16]) for k in d['keys'] if k['use']=='x509-svid']"
+done
+```
+
+### Step 4：`meshConfig.trustDomainAliases`（讓 STRICT mTLS 認得 SPIRE 的 trust domain）
+
+這是 mesh 層級（全域）的設定，效果是**純增量**（只加不減，不影響既有
+istiod CA 簽的身份——細節見文末「為什麼這一步安全」）。兩邊都要加：
+
+```bash
+for ctx in cluster1 cluster2; do
+  kubectl --context=$ctx -n istio-system get cm istio -o jsonpath='{.data.mesh}' > /tmp/mesh-$ctx.yaml
+  # 確認裡面沒有 trustDomainAliases: diy-1152.local 才需要加；已經有就跳過這個 context
+  grep -q "diy-1152.local" /tmp/mesh-$ctx.yaml || \
+    python3 -c "
+import yaml
+d = yaml.safe_load(open('/tmp/mesh-$ctx.yaml'))
+d.setdefault('trustDomainAliases', [])
+if 'diy-1152.local' not in d['trustDomainAliases']:
+    d['trustDomainAliases'].append('diy-1152.local')
+yaml.dump(d, open('/tmp/mesh-$ctx.yaml', 'w'), default_flow_style=False)
+"
+  kubectl --context=$ctx -n istio-system create configmap istio \
+    --from-file=mesh=/tmp/mesh-$ctx.yaml --dry-run=client -o yaml | kubectl --context=$ctx apply -f -
+done
+```
+
+### Step 5：spiffe-csi-driver
+
 ```bash
 kubectl --context=cluster1 apply -f manifests/spiffe-csi-driver.yaml
 kubectl --context=cluster2 apply -f manifests/spiffe-csi-driver.yaml
 ```
 
-### Step 2：patch sidecar injector，加上自訂的 "spire" injection template
+### Step 6：patch sidecar injector，新增 "spire" injection template
+
 ```bash
 python3 patch_sidecar_injector_spire_template_1135.py cluster1
 python3 patch_sidecar_injector_spire_template_1135.py cluster2
 ```
-這個 template 會掛兩個東西進 istio-proxy：SPIRE socket（CSI 驅動）跟
-`spire-full-bootstrap` 這個 ConfigMap（下一步產生）。
 
-### Step 3：`ClusterSPIFFEID`（client/server 各自的 SPIRE 身份）
+這是**新增一個 template 選項**（`inject.istio.io/templates: "sidecar,spire"`
+才會套用），不動預設的 "sidecar" template——沒選它的 pod 完全不受影響。
+
+### Step 7：`ClusterSPIFFEID`（幫 workload 訂自訂 SPIFFE ID 規則）
+
 ```bash
 kubectl --context=cluster1 apply -f manifests/clusterspiffeids.yaml
 kubectl --context=cluster2 apply -f manifests/clusterspiffeids.yaml
 ```
 
-### Step 4：部署 client / server，產生對應的 full-bootstrap ConfigMap
+### Step 8：placeholder `spire-full-bootstrap` ConfigMap
+
+Step 6 的 "spire" template會無條件掛一個名叫 `spire-full-bootstrap` 的
+ConfigMap 進 istio-proxy——這個 ConfigMap 現在還沒有「真的」內容（要從
+一顆已經正常開機的 pod 才生得出來，見 Step 10），**但要先讓它存在**，
+不然 pod 會卡在 `ContainerCreating`（volume 掛不到）。內容目前是什麼都
+無所謂，因為要等到 Step 11 才會真的有東西去讀它：
+
+```bash
+for ns_ctx in "spire-istio-client:cluster1" "spire-istio-client:cluster2" "spire-istio-server:cluster2"; do
+  ns="${ns_ctx%%:*}"; ctx="${ns_ctx##*:}"
+  kubectl --context=$ctx create namespace $ns --dry-run=client -o yaml | kubectl --context=$ctx apply -f -
+  echo '{}' > /tmp/placeholder_bootstrap.json
+  kubectl --context=$ctx -n $ns create configmap spire-full-bootstrap \
+    --from-file=custom_bootstrap_full.json=/tmp/placeholder_bootstrap.json \
+    --dry-run=client -o yaml | kubectl --context=$ctx apply -f -
+done
+```
+
+### Step 9：部署 client / server（第一次開機，還是用 istiod CA）
+
 ```bash
 kubectl --context=cluster1 apply -f manifests/istio-client.yaml
-kubectl --context=cluster2 apply -f manifests/istio-server.yaml
 kubectl --context=cluster2 apply -f manifests/istio-client.yaml   # cluster2 本地也放一份，用來測 DENY
+kubectl --context=cluster2 apply -f manifests/istio-server.yaml
+```
 
-# 用「還沒套用 customConfigFile annotation」前、正常運作中的 pod 產生 full-bootstrap
+這時候 pod 應該正常 `2/2 Running`——因為還沒加 `customConfigFile`
+annotation，sidecar 完全正常用 istiod CA 開機，只是多掛了兩個目前沒人用
+的 volume（SPIRE socket、placeholder ConfigMap）。
+
+### Step 10：產生「真的」full-bootstrap，回填進 ConfigMap
+
+```bash
 python3 gen_custom_bootstrap.py cluster1 spire-istio-client istio-client manifests/custom_bootstrap_full_client1.json
 python3 gen_custom_bootstrap.py cluster2 spire-istio-client istio-client manifests/custom_bootstrap_full_client.json
-python3 gen_custom_bootstrap.py cluster2 spire-istio-server <server-pod-name> manifests/custom_bootstrap_full_server.json
+
+SERVER_POD=$(kubectl --context=cluster2 -n spire-istio-server get pod -l app=istio-server -o jsonpath='{.items[0].metadata.name}')
+python3 gen_custom_bootstrap.py cluster2 spire-istio-server $SERVER_POD manifests/custom_bootstrap_full_server.json
 
 kubectl --context=cluster1 -n spire-istio-client create configmap spire-full-bootstrap \
   --from-file=custom_bootstrap_full.json=manifests/custom_bootstrap_full_client1.json --dry-run=client -o yaml | kubectl --context=cluster1 apply -f -
@@ -141,65 +195,122 @@ kubectl --context=cluster2 -n spire-istio-server create configmap spire-full-boo
   --from-file=custom_bootstrap_full.json=manifests/custom_bootstrap_full_server.json --dry-run=client -o yaml | kubectl --context=cluster2 apply -f -
 ```
 
-`istio-client.yaml`/`istio-server.yaml` 裡已經帶有
-`proxy.istio.io/config: |\n  customConfigFile: "/etc/istio/custom-bootstrap/custom_bootstrap_full.json"`
-annotation，重新 apply/restart 之後 pod 就會用這份客製 bootstrap 啟動：
+（`gen_custom_bootstrap.py` 做的事：抓這顆 pod 現在正常運作的 bootstrap，
+只把裡面 `sds-grpc` 這個 cluster 的 socket path 從 istio-agent 自己的本地
+SDS server 改成 SPIRE Agent 的 socket，其餘照抄——原理見文末。）
+
+### Step 11：加上 `customConfigFile` annotation，重建 pod
+
+Pod annotation 是「活的」metadata，直接 `kubectl annotate`/`patch` 不會
+讓已經在跑的 istio-agent 重新讀取——**annotation 一定要在 pod
+建立當下就存在**，所以做法是編輯 YAML 再整個重建，不是 patch 現有 pod。
+
+在 `manifests/istio-client.yaml` 跟 `manifests/istio-server.yaml`
+裡，把 `# customConfigFile annotation 是...` 那段註解換成：
+```yaml
+    proxy.istio.io/config: |
+      customConfigFile: "/etc/istio/custom-bootstrap/custom_bootstrap_full.json"
+```
+然後重建 pod：
 ```bash
-kubectl --context=cluster1 delete pod istio-client -n spire-istio-client
+kubectl --context=cluster1 -n spire-istio-client delete pod istio-client
 kubectl --context=cluster1 apply -f manifests/istio-client.yaml
-kubectl --context=cluster2 delete pod istio-client -n spire-istio-client
+kubectl --context=cluster2 -n spire-istio-client delete pod istio-client
 kubectl --context=cluster2 apply -f manifests/istio-client.yaml
 kubectl --context=cluster2 -n spire-istio-server rollout restart deployment istio-server
 ```
 
-### Step 5：`DestinationRule` 讓 client 的自動 mTLS 認得自訂 SPIFFE ID
+### Step 12：`DestinationRule`（因為用了自訂 SPIFFE ID 路徑才需要）
+
 ```bash
 kubectl --context=cluster2 apply -f manifests/destinationrule-spire-san.yaml
 ```
-細節看下面「坑」的部分——沒有這個，client 端的憑證驗證會直接失敗。
 
-## 安裝過程踩的坑
+## 驗證
 
-### 坑：Istio 自動 mTLS 產生的驗證規則，預設只認「namespace/serviceaccount」這種 SAN 格式
+```bash
+kubectl --context=cluster2 -n spire-istio-client exec istio-client -c app -- \
+  curl -sS -o /dev/null -w "HTTP_CODE:%{http_code}\n" \
+  http://istio-server.spire-istio-server.svc.cluster.local:8080/
+# cluster2 本地 client（principal 不對）→ 403（DENY，符合預期）
+
+kubectl --context=cluster2 -n spire-istio-server exec <server-pod> -c istio-proxy -- pilot-agent request GET certs
+# 確認 subject_alt_names.uri 是 spiffe://diy-1152.local/cluster/... 而不是 spiffe://cluster2.local/ns/.../sa/...
+```
+
+**沒標註的其他 pod**：不受任何影響，繼續用 istiod 內建 CA——整套機制完全
+opt-in、per-pod、per-namespace（細節見下方「為什麼只影響有標註的 pod」）。
+
+## 核心機制：為什麼要繞這麼一大圈
+
+Istio **1.14+** 的 istio-agent 會自動偵測
+`/run/secrets/workload-spiffe-uds/socket` 這個 UDS 存不存在，存在就直接
+跳過 istiod CA，讓 Envoy 直接跟這個 socket 要憑證
+（`istio/istio#37947`，2022-03-31 合併，`v1.14.0` 才第一次出現）。
+**1.13.5 完全沒有這段邏輯**，`spiffe-csi-driver` 掛好、annotation 下對
+了都沒用，sidecar 還是照樣去問 istiod。這是版本硬限制，不是設定錯誤。
+
+嘗試過三條路都走不通：
+
+1. **EnvoyFilter `CLUSTER`/`ADD`** 新增一個指向 SPIRE socket 的 cluster
+   → 被 Envoy 拒絕：`ApiConfigSource must have a statically defined
+   non-EDS cluster`——SDS 用的 cluster 規定要在 bootstrap 階段就存在，
+   動態下發的不算
+2. **EnvoyFilter `BOOTSTRAP`/`MERGE`**（理論上該幹這件事的機制）→ 完全
+   沒生效，因為 1.13.5 的 istio-agent 產生 bootstrap 是純本地離線做的，
+   不會去問 istiod 有沒有適用的 EnvoyFilter
+3. **直接用 `bootstrapOverride` 重新定義既有的 `sds-grpc` cluster** →
+   Envoy 啟動時直接 crash：`duplicate cluster 'sds-grpc'`——這個
+   merge 機制對 list 類型欄位是 append 不是覆蓋
+
+真正走通的路：pilot-agent 的 `proxy.istio.io/config` 裡有一個
+`customConfigFile` 欄位，**完整替換**（不是 merge）用來產生 bootstrap 的
+來源檔案。拿這顆 pod 原本正常運作時的 bootstrap 原封不動複製一份，只把
+裡面 `sds-grpc` 這個 cluster 的 socket path 改指到 SPIRE Agent 的
+socket——因為所有 listener 早就已經在用 `cluster_name: sds-grpc`
+這個名字要憑證，改這一個地方就夠了，完全不用碰任何 listener/filter
+chain patch。SPIRE Agent 的 socket 是雙協定的（除了 SPIFFE Workload
+API，也直接支援 Envoy 原生 SDS 協定），所以 Envoy 可以直接跟它要
+`default`/`ROOTCA`。
+
+istio-agent 自己內部那個 SDS server 還是照常啟動、照常跟 istiod 要憑證
+（log 還是會看到 `generated new workload certificate`）——只是現在
+**沒有人接它**，因為 `sds-grpc` 已經被指到別的地方去了，那份憑證變成
+孤兒，不影響任何實際流量。
+
+## 為什麼需要 `DestinationRule`
 
 `AuthorizationPolicy` 要用 `principals` 分辨 cluster1 跟 cluster2 的
 client，所以 `ClusterSPIFFEID` 故意把叢集名稱編進 SPIFFE ID 路徑
-（`.../cluster/{{ .ClusterName }}/istio-client`），不是 Istio 自己會猜的
-`.../ns/{namespace}/sa/{serviceaccount}` 格式。這造成 client 呼叫 server
-時，client 自己的出向 Envoy 直接回 `CERTIFICATE_VERIFY_FAILED`——因為
-Istio 幫 client 自動產生的「應該驗證 server 憑證的哪個 SAN」清單，是根據
-server 的 k8s namespace/serviceaccount 猜的：
-```
-spiffe://cluster2.local/ns/spire-istio-server/sa/istio-server
-spiffe://diy-1152.local/ns/spire-istio-server/sa/istio-server
-```
-跟 server 實際拿到的憑證（`.../cluster/cluster2/istio-server`）兜不起來。
-修法：加一個 `DestinationRule`（`trafficPolicy.tls.mode: ISTIO_MUTUAL` +
-明確列出 `subjectAltNames`），把我們自訂的 SPIFFE ID 路徑額外告訴 client
-的驗證邏輯。
+（`.../cluster/{{ .ClusterName }}/istio-client`），不是 Istio 自己會猜
+的 `.../ns/{namespace}/sa/{serviceaccount}` 格式（官方 1.14+ 的 SPIRE
+sample 用的就是標準格式，所以完全不需要 DestinationRule——這步純粹是
+我們自己選擇自訂路徑帶來的成本，跟 Istio 版本無關，就算升到 1.29 一樣
+省不掉）。少了這個 DestinationRule，client 端會直接
+`CERTIFICATE_VERIFY_FAILED`，因為 Istio 自動 mTLS 幫 client 猜的驗證
+SAN 是根據 destination 的 k8s namespace/serviceaccount 猜的，猜不到
+自訂路徑。
 
-## 結果
+## 為什麼 Step 4 的 `trustDomainAliases` 改動是安全的
 
-**cluster2 本地 client（錯誤 principal，預期 DENY）：**
-```
-HTTP_CODE:403
-```
-server 端 log：
-```
-rbac_access_denied_matched_policy[none] ... peer_uri_san="spiffe://diy-1152.local/cluster/cluster2/istio-client"
-```
-`AuthorizationPolicy` 正確地從**真正 mTLS 交握**拿到的 client 憑證 SAN
-去判斷，且正確 DENY（因為只允許 `.../cluster/cluster1/istio-client`）。
+`trustDomainAliases` 是**純增量**的：加了 `diy-1152.local` 之後，
+STRICT mTLS 的 SAN 前綴檢查、自動 mTLS 的 SAN 猜測，都是「或」邏輯——
+既有 istiod CA 簽的憑證（`spiffe://cluster2.local/...`）原本的 trust
+domain 依然在名單裡，不會被取代或移除。沒有任何非 SPIRE pod 會拿到
+`diy-1152.local` 開頭的憑證，所以這個新增的 alias 對它們來說永遠是條
+「不會被用到」的規則，不影響既有行為。
 
-**cluster1 client（正確 principal）：** 已確認能正確簽出對應憑證
-（`spiffe://diy-1152.local/cluster/cluster1/istio-client`）；跨叢集的
-ALLOW 呼叫測試需要額外的 east-west gateway/ServiceEntry 讓 cluster1 的
-outbound envoy 把對 cluster2 NodePort 的呼叫辨識成 mesh 內流量（目前
-`peer-client`/`peer-server`-style 純 IP:NodePort 呼叫，client 端不會觸發
-Istio 自動 mTLS，這是跟本次 SDS 阻塞完全獨立、另一個關於跨叢集服務發現的
-問題，非本次要驗證的範圍）。
+## 為什麼只影響有標註的 pod
 
-**非標註 pod（沒有 `spiffe.io/spire-managed-identity` 的其他 sidecar）**：
-不受影響，繼續使用 istiod 內建 CA——因為整個機制只透過個別 pod 自己的
-`customConfigFile`/`bootstrapOverride` 生效，沒有動到全域的
-`istio-sidecar-injector` 預設 "sidecar" template 或 mesh 層級設定。
+- `inject.istio.io/templates: "sidecar,spire"` — 沒加的 pod 只吃預設
+  "sidecar" template，不會碰到 SPIRE socket / custom-bootstrap volume
+- `proxy.istio.io/config` 的 `customConfigFile` — 沒加的 pod，
+  istio-agent 照舊用內建 template 產生 bootstrap，`sds-grpc` 還是指向
+  自己本地的 SDS server（走 istiod CA）
+- `spire-full-bootstrap` ConfigMap 是 **per-namespace** 的——要讓某個
+  namespace 的 workload 走 SPIRE CA，該 namespace 要有這個 ConfigMap；
+  沒標註的 pod 就算跟它同一個 namespace，也不會去 mount 它
+
+## 離線安裝
+
+見 [`OFFLINE_INSTALL.md`](./OFFLINE_INSTALL.md)。
