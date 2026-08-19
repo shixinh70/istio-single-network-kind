@@ -159,81 +159,123 @@ ConfigMap 除了 `config` 還有 `values`（Helm values，裡面有
 istiod 開始警告 `missing ConfigMap values key`）。要讀出**兩個 key**
 一起改一起寫回：
 
-```bash
-kubectl --context=$ctx -n istio-system get cm istio-sidecar-injector -o jsonpath='{.data.config}' > /tmp/injector-config.yaml
-kubectl --context=$ctx -n istio-system get cm istio-sidecar-injector -o jsonpath='{.data.values}' > /tmp/injector-values.json
-# 用 python/yaml 修改 /tmp/injector-config.yaml 的 templates 那段（見下）
-kubectl --context=$ctx -n istio-system create configmap istio-sidecar-injector \
-  --from-file=config=/tmp/injector-config.yaml \
-  --from-file=values=/tmp/injector-values.json \
-  --dry-run=client -o yaml | kubectl --context=$ctx apply -f -
-```
-
-**`cluster1`**（1.13.5，沒有 native sidecar，要 `customConfigFile`
+`cluster1`（1.13.5，沒有 native sidecar，要 `customConfigFile`
 workaround，driver 名稱用 `csi-xver.spiffe.io`）——新增一個叫
-`spire-xver` 的 template（不是 `spire`，因為 `22-` 已經用掉
-`spire` 這個 key，指向它自己的標準 driver）：
+`spire-xver` 的 template（不是 `spire`，因為 `22-` 已經用掉 `spire`
+這個 key，指向它自己的標準 driver）：
 
-```yaml
-  spire-xver: |
-    labels:
-      spiffe.io/spire-managed-identity: "true"
-    spec:
-      containers:
-      - name: istio-proxy
-        volumeMounts:
-        - name: workload-socket
-          mountPath: /run/secrets/workload-spiffe-uds
-          readOnly: true
-        - name: custom-bootstrap-volume
-          mountPath: /etc/istio/custom-bootstrap
-          readOnly: true
-      volumes:
-      - name: workload-socket
-        csi:
-          driver: "csi-xver.spiffe.io"
-          readOnly: true
-      - name: custom-bootstrap-volume
-        configMap:
-          name: spire-full-bootstrap
+```bash
+kubectl --context=cluster1 -n istio-system get cm istio-sidecar-injector -o jsonpath='{.data.config}' > /tmp/injector-config-cluster1.yaml
+kubectl --context=cluster1 -n istio-system get cm istio-sidecar-injector -o jsonpath='{.data.values}' > /tmp/injector-values-cluster1.json
+
+python3 << 'EOF'
+import yaml
+
+spire_xver_template = """labels:
+  spiffe.io/spire-managed-identity: "true"
+spec:
+  containers:
+  - name: istio-proxy
+    volumeMounts:
+    - name: workload-socket
+      mountPath: /run/secrets/workload-spiffe-uds
+      readOnly: true
+    - name: custom-bootstrap-volume
+      mountPath: /etc/istio/custom-bootstrap
+      readOnly: true
+  volumes:
+  - name: workload-socket
+    csi:
+      driver: "csi-xver.spiffe.io"
+      readOnly: true
+  - name: custom-bootstrap-volume
+    configMap:
+      name: spire-full-bootstrap
+"""
+
+with open('/tmp/injector-config-cluster1.yaml') as f:
+    d = yaml.safe_load(f)
+d['templates']['spire-xver'] = spire_xver_template
+with open('/tmp/injector-config-cluster1.yaml', 'w') as f:
+    yaml.dump(d, f, default_flow_style=False)
+print("templates now:", list(d['templates'].keys()))
+EOF
+
+kubectl --context=cluster1 -n istio-system create configmap istio-sidecar-injector \
+  --from-file=config=/tmp/injector-config-cluster1.yaml \
+  --from-file=values=/tmp/injector-values-cluster1.json \
+  --dry-run=client -o yaml | kubectl --context=cluster1 apply -f -
 ```
 
-**`cluster1-134`**（1.29.6，native sidecar，原生支援不用
-customConfigFile，driver 用標準名稱）——新增一個叫 `spire` 的
-template：
+`cluster1-134`（1.29.6，native sidecar，原生支援不用 customConfigFile，
+driver 用標準名稱）——新增一個叫 `spire` 的 template。用
+`initContainers:` 不是 `containers:`——k8s 1.34 支援 native sidecar，
+這個 template 沒跟 `containers:` 混用的話會產生兩個同名 `istio-proxy`
+container，一個在 `initContainers` 一個在 `containers`，導致奇怪的
+錯誤：
 
-```yaml
-  spire: |
-    labels:
-      spiffe.io/spire-managed-identity: "true"
-    spec:
-      initContainers:
-      - name: istio-proxy
-        volumeMounts:
-        - name: workload-socket
-          mountPath: /run/secrets/workload-spiffe-uds
-          readOnly: true
-      volumes:
-      - name: workload-socket
-        csi:
-          driver: "csi.spiffe.io"
-          readOnly: true
+```bash
+kubectl --context=cluster1-134 -n istio-system get cm istio-sidecar-injector -o jsonpath='{.data.config}' > /tmp/injector-config-cluster1-134.yaml
+kubectl --context=cluster1-134 -n istio-system get cm istio-sidecar-injector -o jsonpath='{.data.values}' > /tmp/injector-values-cluster1-134.json
+
+python3 << 'EOF'
+import yaml
+
+spire_template = """labels:
+  spiffe.io/spire-managed-identity: "true"
+spec:
+  initContainers:
+  - name: istio-proxy
+    volumeMounts:
+    - name: workload-socket
+      mountPath: /run/secrets/workload-spiffe-uds
+      readOnly: true
+  volumes:
+  - name: workload-socket
+    csi:
+      driver: "csi.spiffe.io"
+      readOnly: true
+"""
+
+with open('/tmp/injector-config-cluster1-134.yaml') as f:
+    d = yaml.safe_load(f)
+d['templates']['spire'] = spire_template
+with open('/tmp/injector-config-cluster1-134.yaml', 'w') as f:
+    yaml.dump(d, f, default_flow_style=False)
+print("templates now:", list(d['templates'].keys()))
+EOF
+
+kubectl --context=cluster1-134 -n istio-system create configmap istio-sidecar-injector \
+  --from-file=config=/tmp/injector-config-cluster1-134.yaml \
+  --from-file=values=/tmp/injector-values-cluster1-134.json \
+  --dry-run=client -o yaml | kubectl --context=cluster1-134 apply -f -
 ```
 
-（用 `initContainers:` 不是 `containers:`——k8s 1.34 支援 native
-sidecar，這個 template 沒跟 `containers:` 混用的話會產生兩個同名
-`istio-proxy` container，一個在 `initContainers` 一個在
-`containers`，導致奇怪的錯誤。）
+**如果 `cluster1-134` 是全新裝 spiffe-csi-driver**（這座物理叢集這次
+剛好沒有既有的，直接用標準名稱裝，不用像 `cluster1` 那樣搞
+`-plugin-name`）：driver binary 回應 `GetPluginInfo` 預設就是
+`csi.spiffe.io`（不用額外傳 `-plugin-name`），但 K8s 的 `CSIDriver`
+API 物件的 `metadata.name` **要手動建、要跟 binary 實際回應的名稱一致**
+——親身踩過這個坑：`CSIDriver` 物件名稱打錯，pod 會卡 `Init:0/2`，
+`describe pod` 會看到 `volume mode "Ephemeral" not supported by driver
+csi.spiffe.io (no CSIDriver object)`，即使 driver DaemonSet 本身是
+`Running` 也一樣——driver 實際註冊的身份、K8s CSIDriver API 物件的
+名稱，這兩件事是分開的，要對齊：
 
-**如果 `cluster1-134` 是全新裝 spiffe-csi-driver**：driver binary 回應
-`GetPluginInfo` 預設就是 `csi.spiffe.io`（不用額外傳
-`-plugin-name`），但 K8s 的 `CSIDriver` API 物件的 `metadata.name`
-**要手動建、要跟 binary 實際回應的名稱一致**——親身踩過這個坑：
-`CSIDriver` 物件名稱打錯（或改了但沒同步改回 binary 真正用的名稱），
-pod 會卡 `Init:0/2`，`describe pod` 會看到 `volume mode "Ephemeral" not
-supported by driver csi.spiffe.io (no CSIDriver object)`，即使 driver
-DaemonSet 本身是 `Running` 也一樣——這兩件事（driver 實際註冊的身份、
-K8s CSIDriver API 物件的名稱）是分開的，要對齊。
+```bash
+cat << 'EOF' | kubectl --context=cluster1-134 apply -f -
+apiVersion: storage.k8s.io/v1
+kind: CSIDriver
+metadata:
+  name: "csi.spiffe.io"
+spec:
+  attachRequired: false
+  podInfoOnMount: true
+  fsGroupPolicy: None
+  volumeLifecycleModes:
+    - Ephemeral
+EOF
+```
 
 ### Step 8：`ClusterSPIFFEID`（兩邊）
 
