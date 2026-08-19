@@ -1,0 +1,33 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: spire-test-client
+  labels:
+    istio-injection: enabled
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: spire-test-client
+  namespace: spire-test-client
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: spire-test-client
+  namespace: spire-test-client
+  labels:
+    app: spire-test-client
+    spiffe.io/spire-managed-identity: "true"
+  annotations:
+    inject.istio.io/templates: "sidecar,spire"
+    # customConfigFile annotation is added in a LATER step (see README) —
+    # it can't be here from the start: pilot-agent would try to boot Envoy
+    # from that file on the very first start, before the file has any real
+    # content (it's generated FROM this pod's own first-boot bootstrap).
+spec:
+  serviceAccountName: spire-test-client
+  containers:
+  - name: app
+    image: curlimages/curl:8.16.0
+    command: ["sleep", "infinity"]

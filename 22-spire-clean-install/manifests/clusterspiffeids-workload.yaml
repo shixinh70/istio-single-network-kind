@@ -1,0 +1,25 @@
+apiVersion: spire.spiffe.io/v1alpha1
+kind: ClusterSPIFFEID
+metadata:
+  name: spire-test-client-workload
+spec:
+  spiffeIDTemplate: "spiffe://{{ .TrustDomain }}/cluster/{{ .ClusterName }}/spire-test-client"
+  namespaceSelector:
+    matchLabels:
+      kubernetes.io/metadata.name: spire-test-client
+  workloadSelectorTemplates:
+    - "k8s:ns:spire-test-client"
+    - "k8s:sa:spire-test-client"
+---
+apiVersion: spire.spiffe.io/v1alpha1
+kind: ClusterSPIFFEID
+metadata:
+  name: spire-test-server-workload
+spec:
+  spiffeIDTemplate: "spiffe://{{ .TrustDomain }}/cluster/{{ .ClusterName }}/spire-test-server"
+  namespaceSelector:
+    matchLabels:
+      kubernetes.io/metadata.name: spire-test-server
+  workloadSelectorTemplates:
+    - "k8s:ns:spire-test-server"
+    - "k8s:sa:spire-test-server"
