@@ -1,0 +1,43 @@
+# Applied on cluster1 only. cluster1 and cluster1-134 are two fully
+# independent Kind clusters (no shared pod-CIDR routing, no east-west
+# gateway, no mesh federation between them) - from cluster1's istiod's
+# point of view, cluster1-134's server is just an arbitrary external
+# endpoint it knows nothing about. A ServiceEntry (STATIC resolution,
+# pointing at cluster1-134-worker's docker-network IP + the server's
+# NodePort) plus a DestinationRule forcing ISTIO_MUTUAL is what makes
+# xver-client's own sidecar genuinely originate a real mTLS handshake
+# (using its own SPIRE cert) toward that address, instead of just
+# passing bytes through as opaque TCP the way a plain external/passthrough
+# destination would.
+apiVersion: networking.istio.io/v1alpha3
+kind: ServiceEntry
+metadata:
+  name: xver-server-external
+  namespace: xver-client
+spec:
+  hosts:
+  - xver-server.cross-version.local
+  location: MESH_EXTERNAL
+  ports:
+  - number: 8080
+    name: http
+    protocol: HTTP
+  resolution: STATIC
+  endpoints:
+  - address: "172.18.0.8"   # cluster1-134-worker's docker "kind" network IP
+    ports:
+      http: 30643            # xver-server's NodePort
+---
+apiVersion: networking.istio.io/v1alpha3
+kind: DestinationRule
+metadata:
+  name: xver-server-external-mtls
+  namespace: xver-client
+spec:
+  host: xver-server.cross-version.local
+  trafficPolicy:
+    tls:
+      mode: ISTIO_MUTUAL
+      subjectAltNames:
+      - "spiffe://diy-1296.local/cluster/cluster1-134/xver-server"
+      sni: xver-server.cross-version.local

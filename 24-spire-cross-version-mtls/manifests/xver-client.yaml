@@ -1,0 +1,42 @@
+# Deployed on cluster1 (Istio 1.13.5 - needs the customConfigFile
+# workaround, added in a later step; see README).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: xver-client
+  labels:
+    istio-injection: enabled
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: xver-client
+  namespace: xver-client
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: xver-client
+  namespace: xver-client
+  labels:
+    app: xver-client
+    spiffe.io/spire-managed-identity: "true"
+  annotations:
+    inject.istio.io/templates: "sidecar,spire-xver"
+    # customConfigFile annotation is added in a LATER step (see README) -
+    # can't be here from the start, same chicken-and-egg reason as 21-/22-.
+spec:
+  serviceAccountName: xver-client
+  # cluster1 and cluster1-134 don't share DNS (no federation/remote-secret
+  # between them) - xver-server.cross-version.local isn't resolvable by
+  # CoreDNS, so the app can't even get past its own resolver to let
+  # Envoy's iptables interception kick in. hostAliases is the same fix
+  # used for this exact class of problem in 13-'s agent->mcp scenario.
+  hostAliases:
+  - ip: "172.18.0.8"   # cluster1-134-worker's docker "kind" network IP
+    hostnames:
+    - xver-server.cross-version.local
+  containers:
+  - name: app
+    image: curlimages/curl:8.16.0
+    command: ["sleep", "infinity"]

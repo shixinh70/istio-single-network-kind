@@ -1,0 +1,25 @@
+apiVersion: spire.spiffe.io/v1alpha1
+kind: ClusterSPIFFEID
+metadata:
+  name: xver-client-workload
+spec:
+  spiffeIDTemplate: "spiffe://{{ .TrustDomain }}/cluster/{{ .ClusterName }}/xver-client"
+  namespaceSelector:
+    matchLabels:
+      kubernetes.io/metadata.name: xver-client
+  workloadSelectorTemplates:
+    - "k8s:ns:xver-client"
+    - "k8s:sa:xver-client"
+---
+apiVersion: spire.spiffe.io/v1alpha1
+kind: ClusterSPIFFEID
+metadata:
+  name: xver-server-workload
+spec:
+  spiffeIDTemplate: "spiffe://{{ .TrustDomain }}/cluster/{{ .ClusterName }}/xver-server"
+  namespaceSelector:
+    matchLabels:
+      kubernetes.io/metadata.name: xver-server
+  workloadSelectorTemplates:
+    - "k8s:ns:xver-server"
+    - "k8s:sa:xver-server"

@@ -131,16 +131,24 @@ kubectl --context=cluster2 -n spire-agent rollout status daemonset spire-agent -
 mesh 層級（全域）設定，效果是**純增量**（只加不減，不影響既有 istiod
 CA 簽的身份——原理見文末）。兩邊都要加：
 
+**不要用 `sed`/`printf` 直接接字串**——這個 ConfigMap 的 `data.mesh`
+值常常沒有結尾換行，直接 append 會把新內容黏在最後一行後面變成無效
+YAML（`trustDomain: cluster.localtrustDomainAliases:` 這種黏死的字串），
+istiod 會直接忽略整份設定（好在它有 fail-safe，不會真的爆掉，但也不會
+生效）。用 `python3`+`yaml` 正確解析/合併/寫回：
+
 ```bash
 for ctx in cluster1 cluster2; do
   kubectl --context=$ctx -n istio-system get cm istio -o jsonpath='{.data.mesh}' > /tmp/mesh-$ctx.yaml
-  grep -q "diy-1152.local" /tmp/mesh-$ctx.yaml || {
-    if grep -q "^trustDomainAliases:" /tmp/mesh-$ctx.yaml; then
-      sed -i '/^trustDomainAliases:/a\  - diy-1152.local' /tmp/mesh-$ctx.yaml
-    else
-      printf 'trustDomainAliases:\n  - diy-1152.local\n' >> /tmp/mesh-$ctx.yaml
-    fi
-  }
+  python3 -c "
+import yaml
+d = yaml.safe_load(open('/tmp/mesh-$ctx.yaml'))
+aliases = d.get('trustDomainAliases') or []
+if 'diy-1152.local' not in aliases:
+    aliases.append('diy-1152.local')
+d['trustDomainAliases'] = aliases
+yaml.dump(d, open('/tmp/mesh-$ctx.yaml', 'w'), default_flow_style=False)
+"
   kubectl --context=$ctx -n istio-system create configmap istio \
     --from-file=mesh=/tmp/mesh-$ctx.yaml --dry-run=client -o yaml | kubectl --context=$ctx apply -f -
 done

@@ -1,0 +1,83 @@
+# Deployed on cluster1-134 (Istio 1.29.6, native SPIRE support - no
+# customConfigFile workaround needed, unlike the client on cluster1).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: xver-server
+  labels:
+    istio-injection: enabled
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: xver-server
+  namespace: xver-server
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: xver-server
+  namespace: xver-server
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: xver-server
+  template:
+    metadata:
+      labels:
+        app: xver-server
+        spiffe.io/spire-managed-identity: "true"
+      annotations:
+        inject.istio.io/templates: "sidecar,spire"
+    spec:
+      serviceAccountName: xver-server
+      containers:
+      - name: echo
+        image: hashicorp/http-echo:1.0.0
+        args: ["-text=hello from xver-server (cluster1-134, Istio 1.29.6) via SPIRE-issued cert", "-listen=:8080"]
+        ports:
+        - containerPort: 8080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: xver-server
+  namespace: xver-server
+spec:
+  type: NodePort
+  selector:
+    app: xver-server
+  ports:
+  - port: 8080
+    targetPort: 8080
+    nodePort: 30643
+---
+apiVersion: security.istio.io/v1
+kind: PeerAuthentication
+metadata:
+  name: xver-server-strict
+  namespace: xver-server
+spec:
+  selector:
+    matchLabels:
+      app: xver-server
+  mtls:
+    mode: STRICT
+---
+# 只允許 cluster1（跨版本、Istio 1.13.5）的 xver-client SPIFFE ID 連進來
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: xver-server-allow-cluster1-only
+  namespace: xver-server
+spec:
+  selector:
+    matchLabels:
+      app: xver-server
+  action: ALLOW
+  rules:
+  - from:
+    - source:
+        principals:
+        - "diy-1296.local/cluster/cluster1/xver-client"
