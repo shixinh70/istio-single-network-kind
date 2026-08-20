@@ -1,0 +1,35 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: spire-test-client
+  labels:
+    istio-injection: enabled
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: spire-test-client
+  namespace: spire-test-client
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: spire-test-client
+  namespace: spire-test-client
+  labels:
+    app: spire-test-client
+    spiffe.io/spire-managed-identity: "true"
+  annotations:
+    inject.istio.io/templates: "sidecar,spire"
+    proxy.istio.io/config: |
+      customConfigFile: "/etc/istio/custom-bootstrap/custom_bootstrap_full.json"
+spec:
+  serviceAccountName: spire-test-client
+  hostAliases:
+  - ip: "172.18.0.4"
+    hostnames:
+    - "xtd-server.cross-cluster.local"
+  containers:
+  - name: app
+    image: curlimages/curl:8.16.0
+    command: ["sleep", "infinity"]

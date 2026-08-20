@@ -1,0 +1,31 @@
+apiVersion: networking.istio.io/v1alpha3
+kind: ServiceEntry
+metadata:
+  name: spire-test-server-xcluster
+  namespace: spire-test-client
+spec:
+  hosts:
+  - xtd-server.cross-cluster.local
+  location: MESH_EXTERNAL
+  ports:
+  - number: 8080
+    name: http
+    protocol: HTTP
+  resolution: STATIC
+  endpoints:
+  - address: 172.18.0.4
+    ports:
+      http: 30644
+---
+apiVersion: networking.istio.io/v1alpha3
+kind: DestinationRule
+metadata:
+  name: spire-test-server-xcluster
+  namespace: spire-test-client
+spec:
+  host: xtd-server.cross-cluster.local
+  trafficPolicy:
+    tls:
+      mode: ISTIO_MUTUAL
+      subjectAltNames:
+      - "spiffe://cluster1-134-spire.local/cluster/cluster1-134/spire-test-server"

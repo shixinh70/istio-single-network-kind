@@ -1,0 +1,14 @@
+apiVersion: spire.spiffe.io/v1alpha1
+kind: ClusterSPIFFEID
+metadata:
+  name: spire-test-server-workload
+spec:
+  spiffeIDTemplate: "spiffe://{{ .TrustDomain }}/cluster/{{ .ClusterName }}/spire-test-server"
+  federatesWith:
+    - "cluster1-spire.local"
+  namespaceSelector:
+    matchLabels:
+      kubernetes.io/metadata.name: spire-test-server
+  workloadSelectorTemplates:
+    - "k8s:ns:spire-test-server"
+    - "k8s:sa:spire-test-server"
