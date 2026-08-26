@@ -1,0 +1,20 @@
+# Only needed if `kind create cluster` for kindest/node:v1.34.8 fails with:
+#   error mounting "proc" to rootfs at "/proc": ... no such file or directory
+# inside a nested-container host (e.g. a cloud IDE/sandbox whose own shell
+# already runs inside a container). See README.md "坑 1" for the full
+# diagnosis — this is a known runc >=1.2.2 regression in nested-container
+# environments (https://github.com/opencontainers/runc/issues/4542), and
+# kindest/node:v1.34.8 bundles runc 1.4.2. Swapping in a pre-regression
+# runc build (1.1.14) fixes it; the intermediate/root CA chain doesn't
+# matter here, we're only replacing a binary.
+#
+# Build:
+#   curl -Lo runc.amd64 https://github.com/opencontainers/runc/releases/download/v1.1.14/runc.amd64
+#   chmod +x runc.amd64
+#   docker build -f Dockerfile.node-1.34.8-runc1.1.14 -t kindest/node:v1.34.8-runc1.1.14 .
+#
+# Then create the cluster with --image kindest/node:v1.34.8-runc1.1.14
+# instead of the stock kindest/node:v1.34.8.
+FROM kindest/node:v1.34.8@sha256:02722c2dedddcfc00febf5d27fbeb9b7b2c14294c82109ff4a85d89ac9ba3256
+COPY runc.amd64 /usr/local/sbin/runc
+RUN chmod 0755 /usr/local/sbin/runc
