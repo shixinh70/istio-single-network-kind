@@ -1,0 +1,85 @@
+# Deployed on cluster1 (Istio 1.13.5). Method A: spiffe-helper writes
+# SVID to files; istio-proxy is injected with the PLAIN "sidecar"
+# template only (no CSI socket, no customConfigFile) - Envoy gets its
+# client cert for the xver-server destination straight from files via
+# a DestinationRule(mode: MUTUAL), bypassing istio-agent's SDS entirely.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: client-a
+  labels:
+    istio-injection: enabled
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: client-a
+  namespace: client-a
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: spiffe-helper-conf
+  namespace: client-a
+data:
+  helper.conf: |
+    agent_address = "/run/secrets/workload-spiffe-uds/socket"
+    cert_dir = "/svids"
+    daemon_mode = true
+    svid_file_name = "svid.pem"
+    svid_key_file_name = "svid_key.pem"
+    svid_bundle_file_name = "svid_bundle.pem"
+    key_file_mode = 0444
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: client-a
+  namespace: client-a
+  labels:
+    app: client-a
+    spiffe.io/spire-managed-identity: "true"
+  annotations:
+    # istio-proxy is otherwise plain-injected (no custom template) - this
+    # is the documented way to add a volumeMount to the injected
+    # istio-proxy container referencing a volume already defined at the
+    # pod level ("svids", below), so Envoy can read spiffe-helper's
+    # output files for the DestinationRule(mode: MUTUAL) in Phase 4.
+    sidecar.istio.io/userVolumeMount: '[{"name":"svids","mountPath":"/svids","readOnly":true}]'
+spec:
+  serviceAccountName: client-a
+  # cluster1 and cluster1-134 don't share DNS - hostAliases lets the app's
+  # own resolver succeed so Envoy's iptables interception can kick in
+  # (same pattern as 24-/13-'s agent->mcp scenario).
+  hostAliases:
+  - ip: "172.18.255.51"   # cluster1-134 istio-ingressgateway's MetalLB IP
+    hostnames:
+    - xver-server.cross-version.local
+  containers:
+  - name: app
+    image: curlimages/curl:8.16.0
+    command: ["sleep", "infinity"]
+    volumeMounts:
+    - name: svids
+      mountPath: /svids
+  - name: spiffe-helper
+    image: ghcr.io/spiffe/spiffe-helper:0.9.0
+    args: ["-config", "/run/spiffe-helper/helper.conf"]
+    volumeMounts:
+    - name: spire-agent-socket
+      mountPath: /run/secrets/workload-spiffe-uds
+      readOnly: true
+    - name: svids
+      mountPath: /svids
+    - name: helper-config
+      mountPath: /run/spiffe-helper
+  volumes:
+  - name: spire-agent-socket
+    csi:
+      driver: "csi.spiffe.io"
+      readOnly: true
+  - name: svids
+    emptyDir: {}
+  - name: helper-config
+    configMap:
+      name: spiffe-helper-conf

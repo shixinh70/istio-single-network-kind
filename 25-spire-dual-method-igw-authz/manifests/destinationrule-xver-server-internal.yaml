@@ -1,0 +1,21 @@
+# The istio-ingressgateway -> xver-server backend hop is regular
+# in-mesh auto-mTLS (both are on cluster1-134). Auto-mTLS guesses the
+# backend's expected SAN from its k8s namespace/service-account
+# (spiffe://<trustDomainAlias>/ns/xver-server/sa/xver-server), but our
+# ClusterSPIFFEID issues a custom path instead
+# (.../cluster/cluster1-134/xver-server) - same reason a DestinationRule
+# was needed client-side in 21-/22-/24-, just on this hop instead.
+# Confirmed empirically: without this, the gateway's own outbound call to
+# the backend fails with CERTIFICATE_VERIFY_FAILED / SAN_match.
+apiVersion: networking.istio.io/v1alpha3
+kind: DestinationRule
+metadata:
+  name: xver-server-internal-spire-san
+  namespace: xver-server
+spec:
+  host: xver-server.xver-server.svc.cluster.local
+  trafficPolicy:
+    tls:
+      mode: ISTIO_MUTUAL
+      subjectAltNames:
+      - "spiffe://diy-25.local/cluster/cluster1-134/xver-server"

@@ -1,0 +1,113 @@
+# SPIRE Agent DaemonSet for cluster1.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: spire-agent
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: spire-agent
+  namespace: spire-agent
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: spire25-agent-node-role
+rules:
+- apiGroups: [""]
+  resources: ["pods", "nodes", "nodes/proxy"]
+  verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: spire25-agent-node-role-binding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: spire25-agent-node-role
+subjects:
+- kind: ServiceAccount
+  name: spire-agent
+  namespace: spire-agent
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: spire-agent-conf
+  namespace: spire-agent
+data:
+  agent.conf: |
+    agent {
+      data_dir = "/run/spire"
+      log_level = "INFO"
+      server_address = "spire-server.spire-server.svc.cluster.local"
+      server_port = "8081"
+      trust_domain = "diy-25.local"
+      socket_path = "/run/spire/sockets/socket"
+      insecure_bootstrap = true
+    }
+    plugins {
+      NodeAttestor "k8s_psat" {
+        plugin_data {
+          cluster = "cluster1"
+        }
+      }
+      KeyManager "memory" {
+        plugin_data {}
+      }
+      WorkloadAttestor "k8s" {
+        plugin_data {
+          skip_kubelet_verification = true
+        }
+      }
+    }
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: spire-agent
+  namespace: spire-agent
+spec:
+  selector:
+    matchLabels:
+      app: spire-agent
+  template:
+    metadata:
+      labels:
+        app: spire-agent
+    spec:
+      hostPID: true
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      serviceAccountName: spire-agent
+      containers:
+      - name: spire-agent
+        image: ghcr.io/spiffe/spire-agent:1.15.2
+        args: ["-config", "/run/spire/config/agent.conf"]
+        volumeMounts:
+        - name: spire-config
+          mountPath: /run/spire/config
+          readOnly: true
+        - name: spire-agent-socket
+          mountPath: /run/spire/sockets
+        - name: spire-token
+          mountPath: /var/run/secrets/tokens
+        securityContext:
+          privileged: true
+      volumes:
+      - name: spire-config
+        configMap:
+          name: spire-agent-conf
+      - name: spire-agent-socket
+        hostPath:
+          path: /run/spire-agent-25/sockets
+          type: DirectoryOrCreate
+      - name: spire-token
+        projected:
+          sources:
+          - serviceAccountToken:
+              path: spire-agent
+              expirationSeconds: 7200
+              audience: spire-server

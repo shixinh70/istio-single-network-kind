@@ -1,0 +1,59 @@
+# cluster1 and cluster1-134 are two fully independent Kind clusters (no
+# mesh federation between them) - a ServiceEntry (STATIC) pointing at
+# cluster1-134's istio-ingressgateway MetalLB IP + port 443 registers
+# the gateway as a known mesh destination so client-a's own sidecar
+# actually originates TLS for it (rather than passing bytes through as
+# opaque TCP the way a truly unknown external destination would).
+#
+# ServiceEntry port is 15443 (Istio's own convention for cross-network
+# gateway traffic), NOT 443 - confirmed empirically that reusing port 443
+# breaks routing: Istio's per-port protocol auto-detection is keyed by
+# port NUMBER mesh-wide, not per-destination, and port 443 was already in
+# use by kube-system's metallb-webhook-service as a plain TCP passthrough
+# port on this cluster. Declaring protocol: HTTP on a ServiceEntry sharing
+# that same port number got silently ignored - traffic kept falling
+# through to PassthroughCluster (confirmed via `router debug` logs)
+# because no virtual host / route was ever generated for this host on
+# the shared "443" route table. The endpoint mapping below still points
+# at the gateway's real external port (443) - only the ServiceEntry's own
+# "port identity" changes, the app must dial :15443 for this to route
+# correctly.
+apiVersion: networking.istio.io/v1alpha3
+kind: ServiceEntry
+metadata:
+  name: xver-server-external
+  namespace: client-a
+spec:
+  hosts:
+  - xver-server.cross-version.local
+  location: MESH_EXTERNAL
+  ports:
+  - number: 15443
+    name: https
+    protocol: HTTP
+  resolution: STATIC
+  endpoints:
+  - address: "172.18.255.51"
+    ports:
+      https: 443
+---
+# Method A: MUTUAL mode with direct file paths - Envoy reads
+# spiffe-helper's output files itself, completely bypassing
+# istio-agent's SDS server for this destination.
+apiVersion: networking.istio.io/v1alpha3
+kind: DestinationRule
+metadata:
+  name: xver-server-spiffe-helper-mtls
+  namespace: client-a
+spec:
+  host: xver-server.cross-version.local
+  trafficPolicy:
+    portLevelSettings:
+    - port:
+        number: 15443
+      tls:
+        mode: MUTUAL
+        clientCertificate: /svids/svid.pem
+        privateKey: /svids/svid_key.pem
+        caCertificates: /svids/svid_bundle.pem
+        sni: xver-server.cross-version.local

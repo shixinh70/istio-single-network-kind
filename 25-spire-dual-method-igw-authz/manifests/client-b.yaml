@@ -1,0 +1,39 @@
+# Deployed on cluster1 (Istio 1.13.5). Method B: customConfigFile
+# bootstrap redirect (native SDS to SPIRE Agent's socket). Two-phase
+# deploy required - see README.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: client-b
+  labels:
+    istio-injection: enabled
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: client-b
+  namespace: client-b
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: client-b
+  namespace: client-b
+  labels:
+    app: client-b
+    spiffe.io/spire-managed-identity: "true"
+  annotations:
+    inject.istio.io/templates: "sidecar,spire"
+    # customConfigFile annotation is added in a LATER step (see README) -
+    # can't be here from the start, same chicken-and-egg reason as
+    # 21-/22-/24-.
+spec:
+  serviceAccountName: client-b
+  hostAliases:
+  - ip: "172.18.255.51"   # cluster1-134 istio-ingressgateway's MetalLB IP
+    hostnames:
+    - xver-server.cross-version.local
+  containers:
+  - name: app
+    image: curlimages/curl:8.16.0
+    command: ["sleep", "infinity"]

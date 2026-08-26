@@ -1,0 +1,56 @@
+# Applied on cluster1 (client-a, client-b) and cluster1-134 (xver-server,
+# istio-ingressgateway) as appropriate. Harmless to apply the full set to
+# both - unmatched selectors just produce zero entries on the other side.
+apiVersion: spire.spiffe.io/v1alpha1
+kind: ClusterSPIFFEID
+metadata:
+  name: client-a-workload
+spec:
+  spiffeIDTemplate: "spiffe://{{ .TrustDomain }}/cluster/{{ .ClusterName }}/client-a"
+  namespaceSelector:
+    matchLabels:
+      kubernetes.io/metadata.name: client-a
+  workloadSelectorTemplates:
+    - "k8s:ns:client-a"
+    - "k8s:sa:client-a"
+---
+apiVersion: spire.spiffe.io/v1alpha1
+kind: ClusterSPIFFEID
+metadata:
+  name: client-b-workload
+spec:
+  spiffeIDTemplate: "spiffe://{{ .TrustDomain }}/cluster/{{ .ClusterName }}/client-b"
+  namespaceSelector:
+    matchLabels:
+      kubernetes.io/metadata.name: client-b
+  workloadSelectorTemplates:
+    - "k8s:ns:client-b"
+    - "k8s:sa:client-b"
+---
+apiVersion: spire.spiffe.io/v1alpha1
+kind: ClusterSPIFFEID
+metadata:
+  name: xver-server-workload
+spec:
+  spiffeIDTemplate: "spiffe://{{ .TrustDomain }}/cluster/{{ .ClusterName }}/xver-server"
+  namespaceSelector:
+    matchLabels:
+      kubernetes.io/metadata.name: xver-server
+  workloadSelectorTemplates:
+    - "k8s:ns:xver-server"
+    - "k8s:sa:xver-server"
+---
+# istio-ingressgateway itself, so it can terminate ISTIO_MUTUAL with its
+# own SPIRE identity.
+apiVersion: spire.spiffe.io/v1alpha1
+kind: ClusterSPIFFEID
+metadata:
+  name: istio-ingressgateway-workload
+spec:
+  spiffeIDTemplate: "spiffe://{{ .TrustDomain }}/cluster/{{ .ClusterName }}/istio-ingressgateway"
+  namespaceSelector:
+    matchLabels:
+      kubernetes.io/metadata.name: istio-system
+  workloadSelectorTemplates:
+    - "k8s:ns:istio-system"
+    - "k8s:sa:istio-ingressgateway-service-account"

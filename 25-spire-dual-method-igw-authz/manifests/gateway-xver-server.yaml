@@ -1,0 +1,63 @@
+# tls.mode: ISTIO_MUTUAL - the gateway itself uses its own SPIRE-issued
+# identity (patched onto istio-ingressgateway's own Deployment) as the
+# server cert, and validates the caller's cert against the same SPIRE
+# ROOTCA. No credentialName/K8s Secret needed at all.
+apiVersion: networking.istio.io/v1alpha3
+kind: Gateway
+metadata:
+  name: xver-server-gateway
+  namespace: xver-server
+spec:
+  selector:
+    istio: ingressgateway
+  servers:
+  - port:
+      number: 443
+      name: https
+      protocol: HTTPS
+    tls:
+      mode: ISTIO_MUTUAL
+    hosts:
+    - "xver-server.cross-version.local"
+---
+apiVersion: networking.istio.io/v1alpha3
+kind: VirtualService
+metadata:
+  name: xver-server-vs
+  namespace: xver-server
+spec:
+  hosts:
+  - "xver-server.cross-version.local"
+  gateways:
+  - xver-server-gateway
+  http:
+  - route:
+    - destination:
+        host: xver-server.xver-server.svc.cluster.local
+        port:
+          number: 8080
+---
+# 只允許 cluster1 來的 client-a / client-b SPIFFE ID
+# namespace MUST match istio-ingressgateway's own namespace (istio-system),
+# NOT xver-server - AuthorizationPolicy's selector only ever matches pods
+# in the policy resource's own namespace, regardless of the selector
+# labels themselves (confirmed the hard way: this was originally in
+# xver-server, silently matched zero pods, and every request succeeded
+# with a deliberately wrong principal because the policy was never
+# actually being enforced at all).
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: xver-server-allow-cluster1-only
+  namespace: istio-system
+spec:
+  selector:
+    matchLabels:
+      istio: ingressgateway
+  action: ALLOW
+  rules:
+  - from:
+    - source:
+        principals:
+        - "diy-25.local/cluster/cluster1/client-a"
+        - "diy-25.local/cluster/cluster1/client-b"

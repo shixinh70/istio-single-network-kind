@@ -1,0 +1,39 @@
+apiVersion: networking.istio.io/v1alpha3
+kind: ServiceEntry
+metadata:
+  name: xver-server-external
+  namespace: client-b
+spec:
+  hosts:
+  - xver-server.cross-version.local
+  location: MESH_EXTERNAL
+  ports:
+  # port 15443, not 443 - see serviceentry-client-a.yaml for why (port 443
+  # was already in use mesh-wide by kube-system's metallb-webhook-service,
+  # breaking per-port protocol auto-detection for this ServiceEntry).
+  - number: 15443
+    name: https
+    protocol: HTTP
+  resolution: STATIC
+  endpoints:
+  - address: "172.18.255.51"
+    ports:
+      https: 443
+---
+# Method B: ISTIO_MUTUAL - uses whatever cert istio-agent/SDS currently
+# provides, which (thanks to the customConfigFile redirect from Phase 3)
+# is the SPIRE-issued cert.
+apiVersion: networking.istio.io/v1alpha3
+kind: DestinationRule
+metadata:
+  name: xver-server-istio-mutual
+  namespace: client-b
+spec:
+  host: xver-server.cross-version.local
+  trafficPolicy:
+    portLevelSettings:
+    - port:
+        number: 15443
+      tls:
+        mode: ISTIO_MUTUAL
+        sni: xver-server.cross-version.local
