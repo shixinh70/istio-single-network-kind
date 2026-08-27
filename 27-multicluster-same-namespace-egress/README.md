@@ -1,23 +1,61 @@
 # Multicluster 同名 namespace/Service — egress 是否合併兩座叢集的 endpoint？
 
-延續 `11-resource-memory-v3-largescale/` 的量測方法論，驗證一個沒被那份報告
+延續 `11-resource-memory-v3-largescale/` 的量測方法論，驗證兩個沒被那份報告
 涵蓋到的問題：`cluster1`、`cluster2` 是 Istio multi-primary(single network,
 共用 root CA + remote secret 互相 watch 對方 API server)。如果兩邊各自都有
-**同名的 namespace + 同名的 Service**，`client` 的 `Sidecar` 對這個
-namespace 設 egress 時，istio-proxy 收到的 config 到底是「只有本地叢集的
-endpoint」還是「兩座叢集的 endpoint 合併成同一份」？
+**同名的 namespace + 同名的 Service**：
+1. `client` 的 `Sidecar` 對這個 namespace 設 egress 時，istio-proxy 收到的
+   config 到底是「只有本地叢集的 endpoint」還是「兩座叢集的 endpoint 合併成
+   同一份」？（cluster/listener/route 這些 xDS 資源會不會也跟著疊加？）
+2. `DestinationRule`/`VirtualService` 這種 Istio CRD 設定，是不是也會跟著
+   Service/Endpoints 一起跨叢集同步？
 
 ## 結論(先講重點)
 
-**會合併成同一個邏輯 Service。** Istio 用來識別服務的 key 是
-`<service>.<namespace>.svc.cluster.local` 這個 hostname 字串，這個字串不
-含叢集資訊。只要兩邊 namespace 名稱、Service 名稱都相同(且兩邊
-`clusterDomain` 一致，這裡都是預設 `cluster.local`)，`istiod` 會把兩邊的
-`Endpoints` 合併進**同一個 CDS cluster**，Envoy 端完全看不出這是兩個
-物理叢集拼起來的——LB 演算法會把兩邊的 pod IP 當同一批候選項，預設沒有
-「優先打本地叢集」這回事。
+**Endpoint 會合併,但 cluster/listener/route 本身不會「疊加筆數」,DR/VS 完全不會跨叢集同步。**
 
-這對 `11-` 的記憶體模型有一個延伸推論：**如果你的 mesh 是 multicluster、
+- **Endpoint(EDS)**:Istio 用來識別服務的 key 是
+  `<service>.<namespace>.svc.cluster.local` 這個 hostname 字串,這個字串不
+  含叢集資訊。只要兩邊 namespace 名稱、Service 名稱都相同(且兩邊
+  `clusterDomain` 一致,這裡都是預設 `cluster.local`),`istiod` 會把兩邊的
+  `Endpoints` 合併進**同一個 CDS cluster**,Envoy 端完全看不出這是兩個
+  物理叢集拼起來的——LB 演算法會把兩邊的 pod IP 當同一批候選項,預設沒有
+  「優先打本地叢集」這回事。
+- **Cluster(CDS)/Listener(LDS)/Route(RDS)**:這三種資源的 key 分別是
+  hostname、port 號碼、port 號碼——**一樣不含叢集來源**,所以「疊加」這件事
+  對它們來說沒有意義:兩邊同名的 Service,你不會得到兩個 cluster 物件、也
+  不會得到兩份 route,還是**同一個**物件,只是裡面的 endpoint 清單變長。真正
+  會隨叢集數量「疊加筆數」的**只有 endpoint**。
+- **DestinationRule / VirtualService 完全不會跨叢集同步**——這兩個是 Istio
+  CRD,`istiod` 的 remote secret 機制**只拿來 watch 對方叢集的
+  `Service`/`Endpoints`/`Node`/`Pod`(K8s 內建資源),不會去讀對方叢集的
+  Istio CRD**。每座 istiod 只認自己叢集 API server 裡的 DR/VS,即使兩邊
+  Service 的 endpoint 已經合併成同一份,DR/VS 這種「策略」設定還是要在
+  **兩邊各自 apply 一份一模一樣的**,不會自動同步過去。
+
+實測驗證(用同一個 `shared-svc.shared-ns.svc.cluster.local`):在 `cluster2`
+單獨套一份 `DestinationRule`(`outlierDetection: consecutive5xxErrors: 3`),
+`cluster1` 上的 client 完全看不到:
+
+```
+istioctl --context=cluster1 proxy-config cluster curl-client.client-egress-test \
+  --fqdn shared-svc.shared-ns.svc.cluster.local -o json | jq '.[0].outlierDetection'
+# → 不存在這個欄位(NOT PRESENT)
+```
+
+把**同一份**DR 也套到 `cluster1` 自己身上後,馬上就看得到:
+
+```json
+{"consecutive5xx": 3, "interval": "10s", "baseEjectionTime": "30s", ...}
+```
+
+證實 DR 的生效範圍只跟「這份 CRD 是不是存在於這座叢集自己的 K8s API」有
+關,跟 endpoint 有沒有跨叢集合併是兩件完全獨立的事——**這也是官方
+multi-primary 文件會特別提醒的最佳實務:VirtualService/DestinationRule/
+Gateway 這類設定資源,要靠你自己的部署流程(GitOps 之類)複製到每一座
+member cluster,Istio 本身不會幫你同步。**
+
+這對 `11-` 的記憶體模型有一個延伸推論:**如果你的 mesh 是 multicluster、
 namespace/Service 又同名，某個叢集的 endpoint 數量會被「對方叢集的 replica
 數」影響，即使你自己這座叢集完全沒有變動**——`11-` 報告量的
 `~0.745 KB/endpoint (allocated)`、`~6.32 KB/endpoint (working_set)`，在
