@@ -242,6 +242,58 @@ trustDomain 加進自己的 `trustDomainAliases`，缺一邊都會失敗，而�
 同時看到 `"hello from cluster1"` 跟 `"hello from cluster2"`，證實流量真的
 會被 Envoy 的 LB 分配到兩座實體叢集的 pod。
 
+## 「只留本地叢集流量」的正確做法:`clusterLocal`,不是 `DestinationRule.localityLbSetting`
+
+endpoint 合併之後很自然會想問:「那我可以強制 100% 只打本地叢集嗎？」
+第一次嘗試用 `DestinationRule.trafficPolicy.loadBalancer.localityLbSetting.
+distribute`(Istio 官方的 locality-weighted LB 機制,`from`/`to` 指定
+region/zone 權重)**在這個 lab 裡實測是無效的**——追查發現：
+
+1. **目的地(endpoint)的 locality 是對的**:`istiod` 正確從 Node label
+   讀出來,兩邊 pod 各自標成 `region1/zone1`、`region2/zone2`。
+2. **呼叫端自己的 locality 抓不到**:`istio-proxy` 啟動時是靠**雲端平台
+   metadata service**(AWS/GCP/Azure 的 instance metadata API)去偵測自己
+   的 locality,log 裡看得到 `error in getting aws info for iam/info:
+   dial tcp [fd00:ec2::254]:80: connect: network is unreachable`——Kind
+   是裸機環境,這個偵測必然失敗。
+3. 用 `sidecar.istio.io/proxyMetadata` annotation 手動塞
+   `ISTIO_META_REGION`/`ISTIO_META_ZONE` 也救不回來:bootstrap 的
+   `node.metadata` 確實寫進去了,但 Envoy 真正拿來做 locality matching
+   的結構化 `node.locality` 欄位還是空的,`distribute` 的 `from` matcher
+   永遠比對不到,規則形同虛設,實測流量分佈完全沒變。
+
+**正確、可靠的做法是 `meshConfig.serviceSettings[].settings.clusterLocal:
+true`**(這個 lab 的 `04-set-traffic-local/` 目錄本來就是在裝這個)——
+這是完全不同的機制:**不是在 EDS 合併之後才用權重去偏好本地**,而是在
+`istiod` 產生 EDS 回應**之前**,直接把符合 `hosts` 的目的地標成
+「這個 hostname 永遠只回本地叢集的 endpoint」,遠端叢集的 endpoint
+根本不會被放進候選清單——完全不需要呼叫端有正確的 locality,也就不會被
+裸機環境沒有雲端 metadata 這件事卡住。
+
+實測(針對 `shared-svc.shared-ns.svc.cluster.local` 單獨套用,不影響其他
+host):
+
+```yaml
+# meshConfig 加這一段(讀改寫回 istio-system/istio ConfigMap 的 mesh 這個 key,套用後要 rollout restart istiod)
+serviceSettings:
+- hosts:
+  - shared-svc.shared-ns.svc.cluster.local
+  settings:
+    clusterLocal: true
+```
+
+```
+套用前:istioctl proxy-config endpoint 顯示 5 個 endpoint(2 個 cluster1 + 3 個 cluster2)
+套用 + rollout restart istiod 後:只剩 2 個(cluster1 自己的),cluster2 的 3 個完全從候選清單消失
+實際打 20 次:20/20 全部是 "hello from cluster1"
+```
+
+**結論**:multicluster 下想要「這個服務不要跨叢集」,該用的是
+`clusterLocal`,不是 `DestinationRule` 的 locality 權重——後者的前提
+(呼叫端要有正確的結構化 locality)在裸機/Kind 這種沒有雲端 metadata
+service 的環境下不成立,前者則是在 registry 合併這一層之前就把候選名單
+過濾乾淨,不依賴任何 locality 偵測,穩定可靠。
+
 ## 這對之前所有實驗的提醒
 
 這個 lab 長期把 `cluster1`/`cluster2` 當成同一個 multi-primary mesh 用，但
