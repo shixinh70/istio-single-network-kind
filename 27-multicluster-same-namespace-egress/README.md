@@ -55,6 +55,38 @@ multi-primary 文件會特別提醒的最佳實務:VirtualService/DestinationRul
 Gateway 這類設定資源,要靠你自己的部署流程(GitOps 之類)複製到每一座
 member cluster,Istio 本身不會幫你同步。**
 
+## 重要澄清:「只疊加 endpoint」只在本地已有同名 Service 時成立
+
+上面的結論很容易被過度推論成「遠端叢集的 Service 都只會加 endpoint,很
+便宜」——**這是錯的**。實測第三種情境:`cluster2` 有 `shared-ns/shared-svc`,
+但 `cluster1` **完全沒有這個 namespace**(不是同名、是本地根本不存在):
+
+```
+istioctl --context=cluster1 proxy-config cluster curl-client.client-egress-test \
+  --fqdn shared-svc.shared-ns.svc.cluster.local
+# SERVICE FQDN                             PORT   TYPE   ← 全新的 cluster,不是「併入既有 cluster」
+# shared-svc.shared-ns.svc.cluster.local   8080   EDS
+istioctl --context=cluster1 proxy-config endpoint curl-client.client-egress-test | grep shared-svc
+# 3 個 10.20.x IP,100% 來自 cluster2,cluster1 本地一個 pod 都沒有
+```
+
+`cluster1` 這邊照樣生出一個**全新的 CDS cluster**,只是裡面的 endpoint
+100% 來自遠端。**判斷「疊加」還是「全新建立」的依據,只看這個 hostname
+在本地叢集有沒有已經存在的 Service 物件,完全不看這個 Service 的 pod 實際
+跑在哪裡**:
+
+| 情境 | cluster/listener/route | endpoint |
+|---|---|---|
+| 本地已有同名 Service,遠端也有 | 不新增(併入既有物件) | 疊加(兩邊 pod 都算進來) |
+| 本地完全沒有這個 Service,只有遠端有 | **全新建立**(當成全新 Service) | 100% 來自遠端 |
+
+換算成 `11-` 的成本模型:前者是「便宜的 endpoint 帳」(~0.745KB/endpoint),
+後者是「昂貴的新 Service 帳」(~95.9KB/service 起跳)——**如果你的
+multicluster mesh 裡,某個 namespace 在遠端叢集有很多本地完全沒有對應的
+Service(常見於「每個團隊自己的服務只掛在自己熟悉的那座叢集」這種不對稱
+佈局),對本地 sidecar 來說,這些遠端 Service 一個都不便宜,要用新 Service
+的價錢去估,不能套用「反正只是加 endpoint」的便宜公式。**
+
 這對 `11-` 的記憶體模型有一個延伸推論:**如果你的 mesh 是 multicluster、
 namespace/Service 又同名，某個叢集的 endpoint 數量會被「對方叢集的 replica
 數」影響，即使你自己這座叢集完全沒有變動**——`11-` 報告量的
