@@ -87,6 +87,29 @@ Service(常見於「每個團隊自己的服務只掛在自己熟悉的那座叢
 佈局),對本地 sidecar 來說,這些遠端 Service 一個都不便宜,要用新 Service
 的價錢去估,不能套用「反正只是加 endpoint」的便宜公式。**
 
+## 大規模驗證:遠端叢集堆再多 DR,本地 istio-proxy 記憶體也完全不受影響
+
+上面的 N=1 測試已經證實 DR 不跨叢集同步,但「完全零成本」跟「成本小到可以
+忽略」是兩回事——所以拉大規模驗證:在 `cluster2` 一次套用 **500 份**
+`consistentHash` DR(`09-`/`11-` 報告都測過,這是單份在本地生效時最貴的
+DR 欄位,~25-40KB/份),`cluster1` 的 client 完全不知情:
+
+| | 套 500 份 DR(在 cluster2)之前 | 之後 |
+|---|---|---|
+| cluster1 client 的 cluster 總數 | 22 | 22(不變) |
+| cluster1 client 的 `config_dump` 位元組數 | 266,566 | **266,566(逐 byte 完全相同)** |
+| cluster1 client 的 `allocated` | 9,968,600 | 9,972,696(+4KB,雜訊範圍內) |
+
+`config_dump` 的位元組數在套 500 份最貴欄位的 DR 前後**完全沒有變化**,
+不是「差距很小」,是連一個 byte 都沒變——如果 `cluster2` 的 DR 真的有被
+`cluster1` 的 istiod 讀到、哪怕只是讀到後決定不生效,`config_dump` 的
+metadata/version 資訊多少都該有點浮動,結果連這個都沒有,證實
+**`cluster1` 的 istiod 從頭到尾沒有向 `cluster2` 發出任何 list/watch DR
+的請求**,不是「讀了但過濾掉」。這對評估 multicluster mesh 的記憶體上限
+是個好消息:不管遠端叢集塞了多少 DR/VS(即使用最貴的欄位、上百上千份),
+只要它們不出現在你自己叢集的 K8s API 裡,對本地每一個 sidecar 來說永遠是
+零成本,不需要算進任何預算。
+
 這對 `11-` 的記憶體模型有一個延伸推論:**如果你的 mesh 是 multicluster、
 namespace/Service 又同名，某個叢集的 endpoint 數量會被「對方叢集的 replica
 數」影響，即使你自己這座叢集完全沒有變動**——`11-` 報告量的
