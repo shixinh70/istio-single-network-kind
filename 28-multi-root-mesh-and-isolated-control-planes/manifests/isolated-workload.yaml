@@ -1,0 +1,53 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: isolated-workload-test
+  labels:
+    istio.io/rev: isolated
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: isolated-server
+  namespace: isolated-workload-test
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: isolated-server}}
+  template:
+    metadata: {labels: {app: isolated-server}}
+    spec:
+      containers:
+      - name: echo
+        image: hashicorp/http-echo:1.0.0
+        args: ["-text=hello from isolated-server", "-listen=:8080"]
+        ports: [{containerPort: 8080}]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: isolated-server
+  namespace: isolated-workload-test
+spec:
+  selector: {app: isolated-server}
+  ports: [{port: 8080, targetPort: 8080}]
+---
+apiVersion: security.istio.io/v1beta1
+kind: PeerAuthentication
+metadata:
+  name: isolated-strict
+  namespace: isolated-workload-test
+spec:
+  mtls:
+    mode: STRICT
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: isolated-client
+  namespace: isolated-workload-test
+  labels: {app: isolated-client}
+spec:
+  containers:
+  - name: curl
+    image: curlimages/curl:8.16.0
+    command: ["sleep", "infinity"]

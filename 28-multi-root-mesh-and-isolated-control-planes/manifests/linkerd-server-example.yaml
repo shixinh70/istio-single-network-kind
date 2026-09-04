@@ -1,0 +1,45 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: linkerd-mtls-test
+  annotations:
+    linkerd.io/inject: enabled
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: linkerd-server
+  namespace: linkerd-mtls-test
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: linkerd-server}}
+  template:
+    metadata: {labels: {app: linkerd-server}}
+    spec:
+      containers:
+      - name: echo
+        image: hashicorp/http-echo:1.0.0
+        args: ["-text=hello from linkerd-server (cluster1-134, pure Linkerd)", "-listen=:8080"]
+        ports: [{containerPort: 8080}]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: linkerd-server
+  namespace: linkerd-mtls-test
+spec:
+  selector: {app: linkerd-server}
+  ports: [{port: 8080, targetPort: 8080}]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: linkerd-server-nodeport
+  namespace: linkerd-mtls-test
+spec:
+  type: NodePort
+  selector: {app: linkerd-server}
+  ports:
+  - port: 8080
+    targetPort: 8080
+    nodePort: 30882

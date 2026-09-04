@@ -1,0 +1,15 @@
+apiVersion: install.istio.io/v1alpha1
+kind: IstioOperator
+metadata:
+  name: cluster1-134
+spec:
+  profile: default
+  meshConfig:
+    accessLogFile: /dev/stdout
+    discoverySelectors:
+      - matchLabels:
+          mesh-group: default
+  components:
+    egressGateways:
+    - name: istio-egressgateway
+      enabled: true

@@ -1,0 +1,6 @@
+*.key
+*.csr
+*.srl
+fresh-roots/
+isolated-pki-output/
+multiroot-certs/

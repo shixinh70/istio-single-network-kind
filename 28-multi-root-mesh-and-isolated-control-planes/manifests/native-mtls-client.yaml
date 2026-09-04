@@ -1,0 +1,54 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: native-mtls-test
+  labels: {istio-injection: enabled}
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: native-client
+  namespace: native-mtls-test
+  labels: {app: native-client}
+spec:
+  hostAliases:
+  - ip: "172.18.0.8"
+    hostnames: ["native-server.remote.local"]
+  containers:
+  - name: curl
+    image: curlimages/curl:8.16.0
+    command: ["sleep", "infinity"]
+---
+apiVersion: networking.istio.io/v1alpha3
+kind: ServiceEntry
+metadata:
+  name: native-server-remote
+  namespace: native-mtls-test
+spec:
+  hosts:
+  - "native-server.remote.local"
+  location: MESH_EXTERNAL
+  ports:
+  - number: 25445
+    name: https
+    protocol: HTTP
+  resolution: STATIC
+  endpoints:
+  - address: "172.18.0.8"
+    ports:
+      https: 30880
+---
+apiVersion: networking.istio.io/v1alpha3
+kind: DestinationRule
+metadata:
+  name: native-server-remote-mtls
+  namespace: native-mtls-test
+spec:
+  host: "native-server.remote.local"
+  trafficPolicy:
+    portLevelSettings:
+    - port:
+        number: 25445
+      tls:
+        mode: ISTIO_MUTUAL
+        sni: "outbound_.8080_._.native-server.native-mtls-test.svc.cluster.local"

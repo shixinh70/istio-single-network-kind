@@ -1,0 +1,47 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: native-mtls-test
+  labels: {istio-injection: enabled}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: native-server
+  namespace: native-mtls-test
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: native-server
+  namespace: native-mtls-test
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: native-server}}
+  template:
+    metadata: {labels: {app: native-server}}
+    spec:
+      serviceAccountName: native-server
+      containers:
+      - name: echo
+        image: hashicorp/http-echo:1.0.0
+        args: ["-text=hello from native-server (cluster1-134, native Istio CA)", "-listen=:8080"]
+        ports: [{containerPort: 8080}]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: native-server
+  namespace: native-mtls-test
+spec:
+  selector: {app: native-server}
+  ports: [{port: 8080, targetPort: 8080}]
+---
+apiVersion: security.istio.io/v1
+kind: PeerAuthentication
+metadata:
+  name: native-server-strict
+  namespace: native-mtls-test
+spec:
+  mtls:
+    mode: STRICT

@@ -1,0 +1,33 @@
+apiVersion: networking.istio.io/v1alpha3
+kind: ServiceEntry
+metadata:
+  name: isolated-server-134-remote
+  namespace: isolated-workload-test
+spec:
+  hosts:
+  - "isolated-server-134.remote.local"
+  location: MESH_EXTERNAL
+  ports:
+  - number: 25447
+    name: https
+    protocol: HTTP
+  resolution: STATIC
+  endpoints:
+  - address: "172.18.0.9"
+    ports:
+      https: 30883
+---
+apiVersion: networking.istio.io/v1alpha3
+kind: DestinationRule
+metadata:
+  name: isolated-server-134-remote-mtls
+  namespace: isolated-workload-test
+spec:
+  host: "isolated-server-134.remote.local"
+  trafficPolicy:
+    portLevelSettings:
+    - port:
+        number: 25447
+      tls:
+        mode: ISTIO_MUTUAL
+        sni: "outbound_.8080_._.isolated-server-134.isolated-workload-test.svc.cluster.local"

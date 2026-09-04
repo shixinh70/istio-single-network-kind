@@ -1,0 +1,21 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: linkerd-mtls-test
+  annotations:
+    linkerd.io/inject: enabled
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: linkerd-client
+  namespace: linkerd-mtls-test
+  labels: {app: linkerd-client}
+spec:
+  hostAliases:
+  - ip: "172.18.0.9"
+    hostnames: ["linkerd-server.remote.local"]
+  containers:
+  - name: curl
+    image: curlimages/curl:8.16.0
+    command: ["sleep", "infinity"]

@@ -1,0 +1,19 @@
+apiVersion: install.istio.io/v1alpha1
+kind: IstioOperator
+metadata:
+  namespace: istio-isolated
+spec:
+  profile: default
+  revision: isolated
+  values:
+    global:
+      istioNamespace: istio-isolated
+  meshConfig:
+    trustDomain: isolated.local
+  components:
+    ingressGateways:
+    - name: istio-ingressgateway
+      enabled: false
+    egressGateways:
+    - name: istio-egressgateway
+      enabled: false
