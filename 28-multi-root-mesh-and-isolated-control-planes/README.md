@@ -284,13 +284,22 @@ scale 場景下，這是實質的、隨機發生的故障率，不能忽略。
 |---|---|---|
 | proto 欄位存在(`discovery_selectors`, field 59) | ✅ | ✅ |
 | `istio-ca-root-cert` race 解決 | ❌ 仍然閃爍 | ✅ 連續 5 次查詢完全穩定 |
-| 沒帶 `istio.io/rev` label 的 DR 隔離 | 未測(已知版本不支援) | ✅ isolated istiod 完全讀不到 |
+| 沒帶 `istio.io/rev` label 的 DR 隔離 | ❌ **實測確認也沒生效** | ✅ isolated istiod 完全讀不到 |
 | 既有功能(本地/跨叢集 mTLS、隔離) | ✅ 全部維持正常 | ✅ 全部維持正常，無回歸 |
 
-跟第 1 節 `ISTIO_MULTIROOT_MESH`/`caCertificates` 同一種模式：**proto
-欄位在 1.13.5 就存在，但背後真正的功能邏輯是在 1.13.5 之後、1.29.6 之前
-的某個版本才補上的**。1.29.6 上完全照官方文件描述的行為運作，沒有任何
-落差；1.13.5 上只有 CRD 隔離部分生效，ConfigMap 同步範圍限縮這塊完全沒接上。
+**DR 隔離這項有重新嚴謹驗證過，不是憑印象推測**：一開始只確認了
+`istio-ca-root-cert` 沒生效，就直接假設「CRD 隔離大概也不支援」，事後
+被問到「你確定嗎」才回頭補測——用套用 `discoverySelectors`、重啟 istiod
+**之後**才新建的全新 DR（排除舊物件快取殘留的可能）重測，`isolated`
+istiod 仍然讀到了 `default-workload-test`(沒有 `mesh-group: isolated`
+label)的 DR；`istiod-isolated` 的 log 裡完全沒有任何跟
+`discoverySelectors`/namespace filter 相關的訊息（不是報錯，是**安靜到
+像完全沒被處理過**）。所以 1.13.5 上不是「ConfigMap 同步這塊沒接上、CRD
+隔離那塊有接上」的部分生效，是**整個 `discoverySelectors` 機制在
+1.13.5 上完全被忽略**，跟第 1 節 `ISTIO_MULTIROOT_MESH`/`caCertificates`
+同一種模式——proto 欄位在 1.13.5 就存在，但背後真正的功能邏輯是在
+1.13.5 之後、1.29.6 之前的某個版本才補上的。1.29.6 上完全照官方文件
+描述的行為運作，沒有任何落差。
 
 **實務結論**：如果要在 Istio 1.13.5 上做這種雙 control plane 隔離架構，
 `discoverySelectors` 修不好 `istio-ca-root-cert` race 這件事本身就是一個
