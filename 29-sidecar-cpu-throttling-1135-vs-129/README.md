@@ -140,6 +140,74 @@ quota 是整個 container 的總量上限，不是分給每條 thread 各自的�
 分著跑，加總起來能用的 CPU-time 就是那 100m。如果啟動當下需要的 CPU 運算量本身就超過
 100m 能供應的量，調 thread 數幫助有限。
 
+### 補充：拉寬範圍到 1～32 的單次乾淨掃描
+
+上面兩個點只測了 1 跟 16。同一 CPU limit（100m）、同一 mesh（600 假 Service）下，
+把範圍拉寬、單次掃過 1／2／4／8／16／32：
+
+| concurrency | 啟動時間 | throttle 比例 | 累積 throttled_time |
+|---|---|---|---|
+| 1 | 32.1s | 96.8%（269/278） | 33.7s |
+| 2 | 34.1s | 97.4%（299/307） | 46.4s |
+| 4 | 32.7s | 96.1%（271/282） | 39.4s |
+| 8 | 34.2s | 94.8%（292/308） | 40.5s |
+| 16 | 39.1s | 96.2%（332/345） | 50.8s |
+| 32 | **46.0s** | 98.3%（410/417） | 68.6s |
+
+**修正結論**：不是「concurrency 完全不影響」，是「在 1～8 這個接近 CPU limit 合理量級的
+範圍內，影響很小」（啟動時間都在 32～34s 打轉）；但**一旦拉到 16 以上，就會持續、明顯
+惡化**（39s → 46s，throttled_time 從 33.7s 一路墊高到 68.6s，幾乎翻倍）。throttle
+*比例*本身全程都很高、變化不大，但累積 throttled_time 隨 concurrency 持續上升——代表
+被 throttle 的頻率差不多，但每次「多條 thread 同時搶同一份 quota」的嚴重程度隨 thread
+數增加而加重。
+
+### 直接驗證：`--concurrency` 有沒有真的改變 Envoy 的 OS thread 數
+
+不只信 `--concurrency` 這個 flag 字面上寫什麼，直接查 Linux kernel 曝露出來的
+`/proc/<pid>/status`，用兩種方法交叉驗證：
+
+```bash
+ENVOY_PID=$(kubectl exec $pod -c istio-proxy -- pgrep envoy | head -1)
+# 方法一：kernel 記帳的 Threads 欄位
+kubectl exec $pod -c istio-proxy -- sh -c "cat /proc/$ENVOY_PID/status | grep -i threads"
+# 方法二：直接數 /proc/<pid>/task/ 底下的子目錄數量（每個子目錄 = 一條實際執行緒）
+kubectl exec $pod -c istio-proxy -- sh -c "ls /proc/$ENVOY_PID/task/ | wc -l"
+```
+
+| concurrency | `Threads:` 欄位 | `task/` 子目錄數 |
+|---|---|---|
+| 1 | 10 | 10 |
+| 8 | 24 | 24 |
+| 32 | 72 | 72 |
+
+兩種方法結果完全一致，確認 `--concurrency` 真的、直接、等比例地決定 Envoy 的 OS thread
+數，不是只反映在 command line 參數上而已。
+
+### `--concurrency` 固定時，host 核心數還會影響 thread 數嗎？
+
+查了 Envoy 官方 threading model 文件，完整結構是：
+
+```
+main thread          × 1    ← 固定，不受 host 核心數或 --concurrency 影響
+worker thread         × N    ← 只有這裡的預設值是 hardware_concurrency()（host 核心數），
+                                但只要 --concurrency 明確給值，就直接用這個 N，
+                                完全不理會 host 實際有幾核心
+file flusher thread   × 少數 ← 固定
+watchdog thread        × 1    ← 固定
+```
+
+也就是說「worker thread 數 = host 核心數」**只在完全沒指定 `--concurrency`（用 Envoy
+自己的原生預設值）時才成立**。一旦明確指定，不管 host 有 6 核心還是 64 核心，Envoy 拿到
+的 thread 數都固定是你給的那個值——這也解釋了為什麼這次在 6 核心的機器上測 concurrency=1
+/8/32，量到的 10/24/72 條 thread 是穩定、可重現的數字，不會因為換一台更多核心的機器而
+跟著變動。
+
+本來想直接拿一台核心數不同的機器（或用 `docker update --cpuset-cpus` 把 kind node
+可見核心數縮小）做直接對照，但這個沙盒環境的 cgroup 權限擋住了 `cpuset.cpus` 的寫入
+（`device or resource busy`，換了 `cluster1-worker`、`cluster1-control-plane` 兩個不同
+container 都一樣失敗，確認是環境層級的限制，不是特定 container 忙碌造成的），所以這一段
+是靠原始碼/官方文件佐證，沒有辦法在這個環境裡用「換 host 核心數」的方式直接實測驗證。
+
 ### 為什麼「host 核心數更多」理論上仍然值得擔心
 
 雖然 concurrency 從 1 調到 16 對*這次*的 throttle 比例影響不大，但 `--concurrency`
